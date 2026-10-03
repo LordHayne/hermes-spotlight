@@ -8,8 +8,8 @@ rm -f "$HOME/.local/share/applications/hermes-spotlight.desktop" && ok "Removed 
 
 # COSMIC shortcut
 SC="$HOME/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom.ron"
-if [ -f "$SC" ] && grep -q hermes-spotlight "$SC"; then
-    grep -v hermes-spotlight "$SC" > "$SC.tmp" || true
+if [ -f "$SC" ] && grep -q "Hermes Spotlight" "$SC"; then
+    grep -v "Hermes Spotlight" "$SC" > "$SC.tmp" || true
     # keep valid map braces even if now empty
     if ! grep -q "Spawn\|System\|Close" "$SC.tmp"; then
         echo '{' > "$SC.tmp"

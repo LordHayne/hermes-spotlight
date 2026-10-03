@@ -94,42 +94,51 @@ case "$DE" in
         SC_DIR="$HOME/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1"
         mkdir -p "$SC_DIR"
         SC_FILE="$SC_DIR/custom.ron"
-        if [ -f "$SC_FILE" ] && grep -q "hermes-spotlight" "$SC_FILE"; then
-            ok "COSMIC shortcut already configured"
-        else
-            {
-                echo '{'
-                echo '    (modifiers: [Super], key: "space", description: "Hermes Spotlight"): Spawn("'"$CMD"'"),'
-                echo '}'
-            } >> "$SC_FILE"
-            ok "COSMIC shortcut added: Super+Space (takes effect after next login)"
-        fi
+        # Idempotent merge: drop our old line (if any), keep other entries,
+        # re-add ours, rewrite as ONE valid RON map. Never blind-append.
+        "$PY" - "$SC_FILE" "$CMD" <<'PY' || { err "failed to write COSMIC shortcut"; exit 1; }
+import os, sys
+path, cmd = sys.argv[1], sys.argv[2]
+entry = ('    (modifiers: [Super], key: "space", '
+         'description: "Hermes Spotlight"): Spawn("%s"),' % cmd)
+lines = []
+if os.path.exists(path):
+    lines = [l for l in open(path).read().splitlines()
+             if '"Hermes Spotlight"' not in l and l.strip() not in ("{", "}")]
+if lines:
+    out = "{\n" + "\n".join(lines) + "\n" + entry + "\n}\n"
+else:
+    out = "{\n" + entry + "\n}\n"
+open(path, "w").write(out)
+print("  shortcut written (merged, other entries preserved)")
+PY
+        ok "COSMIC shortcut: Super+Space (takes effect after next login)"
         ;;
     *GNOME*|*ubuntu*)
         say "GNOME detected — installing custom shortcut via gsettings…"
         EXISTING="$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings 2>/dev/null || echo "@as []")"
-        NEW="['/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/']"
+        NEW="$("$PY" - "$EXISTING" <<'PY'
+import ast, sys
+raw = sys.argv[1].strip()
+try:
+    lst = [] if raw.startswith("@") else ast.literal_eval(raw)
+except Exception:
+    lst = []
+p = "/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/"
+if p not in lst:
+    lst.append(p)
+print("[" + ", ".join('"%s"' % x for x in lst) + "]")
+PY
+)"
         gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "$NEW" 2>/dev/null || true
         gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/ name "Hermes Spotlight" 2>/dev/null || true
         gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/ command "$CMD" 2>/dev/null || true
         gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/ binding "['<Super>space']" 2>/dev/null || true
-        ok "GNOME shortcut set: Super+Space"
+        ok "GNOME shortcut set: Super+Space (existing custom keybindings preserved)"
         ;;
     *KDE*)
-        say "KDE detected — writing kglobalshortcut src entry…"
-        KC="$HOME/.config/kglobalshortcutsrc"
-        if [ -f "$KC" ] && grep -q hermes-spotlight "$KC"; then
-            ok "KDE shortcut already present"
-        else
-            mkdir -p "$HOME/.local/share/khotkeys"
-            cat > "$HOME/.local/share/khotkeys/hermes-spotlight.desktop" <<EOF
-[Data]
-Name=Hermes Spotlight
-Command=$CMD
-Trigger=Meta+Space
-EOF
-            ok "KDE: added custom shortcut (System Settings → Shortcuts → Custom, key Meta+Space, may need manual enable)"
-        fi
+        say "KDE detected — bind manually (kglobalshortcutsrc is version-fragile):"
+        say "  System Settings → Shortcuts → Add Command → $CMD → bind Meta+Space"
         ;;
     *)
         say "Unknown desktop ($DE) — no shortcut auto-configured."
