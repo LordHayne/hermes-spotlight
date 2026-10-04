@@ -28,4 +28,5 @@ rm -f "$HOME/.local/share/khotkeys/hermes-spotlight.desktop" 2>/dev/null && ok "
 
 # config/cache are kept on purpose (your conversations survive uninstall)
 echo
-ok "Uninstalled. Config kept at ~/.config/hermes-spotlight/ (delete manually if you want)."
+ok "Uninstalled. Settings and history kept — to remove them too:"
+echo "    rm -rf ~/.config/hermes-spotlight ~/.cache/hermes-spotlight ~/.cache/hermes-spotlight-history"

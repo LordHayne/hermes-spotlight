@@ -1,36 +1,44 @@
 # ✦ hermes-spotlight
 
-**A minimal, transparent Spotlight-style AI launcher for the Linux desktop.**
+**A slim, translucent Spotlight-style bar for the Linux desktop — with a real AI agent behind it.**
 
-Press `Alt+Space`, ask anything — your local [hermes-agent](https://github.com/NousResearch/hermes-agent) answers with live streaming, tool-call status and Markdown rendering, in a slim translucent bar that feels native to your desktop.
+Press `Alt+Space`, ask anything — your [hermes-agent](https://github.com/NousResearch/hermes-agent) answers with live streaming, tool-call status, Markdown and native cards, in a bar that feels like your desktop grew it.
 
 ![hermes-spotlight answering a weather question with a native weather card](docs/weather.png)
 
 ## Why
 
-Raycast-style AI launchers are great — but Mac-only and closed-source. On Linux there was nothing that turns a **local, tool-using AI agent** into a one-keystroke overlay. hermes-spotlight does exactly that: it talks to your local Hermes gateway API server, so it has the **same agent, memory, skills, and tools** as your CLI and desktop app sessions. Ask in the spotlight, continue in the app — the conversation is shared.
+Raycast-style AI launchers are great — but Mac-only and closed-source. On Linux there was nothing that turns a **tool-using AI agent** into a one-keystroke overlay. hermes-spotlight does exactly that: it talks to your Hermes gateway on `127.0.0.1`, so it has the **same agent, memory, skills and tools** as your CLI and desktop app sessions. Ask in the spotlight, continue in the app — the conversation is shared.
 
-- 🖥️ **100% local** — talks only to `127.0.0.1:8642`, no cloud, no telemetry
-- ⚡ **Instant** — stays resident after first use: re-opens in ~30 ms, no Electron
-- 🎨 **3 themes** — Tokyo Night, Midnight, Rose Pine (or add your own)
-- 📋 **Markdown answers** — rendered live while streaming: code blocks with a copy button, bold, lists, clickable links; text is selectable
-- 📷 **Screenshots** — `Ctrl+V` an image from the clipboard and ask about it (vision models)
-- ❝ **Highlighted text as context** — select text anywhere, press `Alt+Space`, ask "explain this"; shown as a removable chip, only sent with your question
-- 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready
-- 🚀 **App launcher** — type an app name, Enter starts it; the last row (or Shift+Enter) asks Hermes instead
-- 🔄 **Live streaming** — answer text streams in, tool calls show as `⚙ terminal: …`
-- 🧠 **Session memory** — the conversation survives closing, reboots
+**Ask**
+- 🔄 **Live answers** — text streams in and is rendered as Markdown while it arrives: code blocks with a copy button, lists, clickable links; tool calls show as `⚙ terminal: …`
+- 🌤️ **Native cards** — answers that fit a card get one (weather first), next to the text
 - 📊 **`/status`** — instant local system card: CPU load/temp, parked cores, RAM, GPU, VRAM, running games — live, no agent round trip
+- 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready
+
+**Context**
+- ❝ **Highlighted text** — select text anywhere, press `Alt+Space`, ask "explain this"; it shows up as a removable chip
+- 📷 **Screenshots** — `Ctrl+V` an image from the clipboard and ask about it
+- 🖥️ **Machine context** — the agent knows your OS, CPU, GPU, RAM and running apps, so "why is my game stuttering" gets a real diagnosis
+
+**Do**
+- 🚀 **App launcher** — type an app name, Enter starts it; the last row (or `Shift+Enter`) asks Hermes instead
+- 🪟 **Hand-off** — the logo button opens the full Hermes desktop app; your spotlight conversation is right there in its session list
+- 🧠 **Session memory** — the conversation survives closing and reboots; `/new` starts fresh
+
+**Feel**
+- ⚡ **Instant** — stays resident after first use: re-opens in ~30 ms, no Electron
 - 👻 **Ghost text** — your most frequent earlier question appears greyed out while you type; `Tab` or `→` takes it
-- ⌨️ **Quality of life** — input history (↑/↓), `/new`, `/stop` or `Ctrl+C` to stop a running answer
-- 🪟 **Logo button** — jump straight to the full Hermes desktop app
+- 🎨 **3 themes** — Tokyo Night, Midnight, Rose Pine (or add your own)
 
 ## Cards & context
 
 Some answers deserve more than text. Hermes attaches a small structured
 block to answers that fit a card, and the spotlight renders it natively —
-the text answer always stays, the card sits on top. Weather is the first
-card type; the format is open for more (calendar, packages, game times…).
+the text answer always stays, the card sits next to it. Weather is the
+first card type; the format is open for more (calendar, packages, game
+times…). Whether a card appears depends on your model following the
+format — a broken or missing card never breaks the answer.
 
 `/status` is a card too, but fully local: it never asks the agent, so it
 is there in a fraction of a second and refreshes itself while you look.
@@ -44,16 +52,32 @@ suggests what you asked before.
 
 ![highlighted text and a screenshot as context chips, ghost text completion](docs/context.png)
 
+## Keys & commands
+
+| Key / command | What it does |
+|---|---|
+| `Alt+Space` | open the bar (again: focus it) |
+| `Enter` | launch the selected app, or ask Hermes |
+| `Shift+Enter` | always ask Hermes, even when an app matches |
+| `Tab` / `→` | accept the ghost-text suggestion |
+| `↑` / `↓` | app suggestions, or your question history |
+| `Ctrl+V` | attach a screenshot from the clipboard (text pastes as usual) |
+| `Ctrl+C` | copy text selected in an answer; with nothing selected, stop a running answer |
+| `Esc` | hide the bar — a running answer keeps going in the background |
+| `/new` | start a new conversation |
+| `/stop` | stop the running answer (the agent is interrupted too) |
+| `/status` | local system card |
+
 ## The Vision — the assistant every OS is missing
 
-Every desktop OS ships an "AI assistant" that is either a thin chat wrapper (Siri), a cloud bolt-on nobody asked for (Windows Copilot), or nothing at all (most Linux desktops). What's missing everywhere is the same thing: **an assistant that is part of the OS experience — local, aware of the machine, and actually able to do things.**
+Every desktop OS ships an "AI assistant" that is either a thin chat wrapper (Siri), a cloud bolt-on nobody asked for (Windows Copilot), or nothing at all (most Linux desktops). What's missing everywhere is the same thing: **an assistant that is part of the OS experience — aware of the machine, under your control, and actually able to do things.**
 
 hermes-spotlight is an attempt at that missing layer for Linux:
 
 - **One keystroke, always there.** Not an app you open — an overlay your desktop grows, like Spotlight on macOS. You don't "use" it, you just ask.
-- **The agent, not a wrapper.** Behind the bar is a real agent with tools (terminal, files, browser), persistent memory and skills. It doesn't just answer — it executes. Ask it "why is my game stuttering" and it diagnoses your GPU driver state, because it *knows* your OS, GPU, RAM and running apps (system context is sent with every question).
-- **100% local, by architecture.** Not "we respect your privacy" — there is simply no cloud path. The widget talks only to `127.0.0.1`. Your machine context, your conversations, your keys.
-- **Native, not Electron.** a single-file GTK4 app, stdlib-only client, no bundled Chromium. It should feel like the desktop grew it.
+- **The agent, not a wrapper.** Behind the bar is a real agent with tools (terminal, files, browser), persistent memory and skills. It doesn't just answer — it executes. Ask it "why is my game stuttering" and it checks your GPU driver state, because it *knows* your OS, GPU, RAM and running apps.
+- **Local by architecture.** The widget only talks to your own gateway on `127.0.0.1` — no accounts, no telemetry, no server of ours in between. Where the thinking happens is your choice in Hermes: run a local model and nothing leaves your machine; pick a cloud model and only Hermes talks to it.
+- **Native, not Electron.** A single-file GTK4 app, stdlib-only client, no bundled Chromium. It should feel like the desktop grew it.
 
 **Where this goes:** quick answers → app launching → system diagnosis → eventually the place where you handle everything that isn't a full app: "clean my shader cache", "why did that crash", "set up the new drive". The bar stays slim; the agent grows.
 
@@ -68,6 +92,11 @@ The North Star: *the user should never think "I need to open a terminal for this
   - Fedora: `sudo dnf install python3-gobject gtk4`
 - [hermes-agent](https://github.com/NousResearch/hermes-agent) with the gateway running locally
 
+Optional:
+- a **vision-capable model** in Hermes for screenshots
+- `nvidia-smi` (NVIDIA) or the `amdgpu` driver for GPU values in `/status`
+- a color emoji font (e.g. Noto Color Emoji) for the card icons
+
 ## Install
 
 ```bash
@@ -81,7 +110,7 @@ The installer:
 1. Checks Python + PyGObject + GTK4
 2. Enables the gateway's local API server and generates an API key if missing
 3. Installs `hermes-spotlight` to `~/.local/bin` + an app-menu entry
-4. Binds **Alt+Space** automatically on COSMIC and GNOME (KDE: creates the shortcut, enable once in System Settings)
+4. Binds **Alt+Space** automatically on COSMIC and GNOME (KDE: see below)
 
 On COSMIC the shortcut activates after the next login. GNOME is instant.
 
@@ -97,6 +126,7 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
   "width": 700,
   "max_height": 600,
   "resident": true,
+  "system_context": true,
   "selection_context": true,
   "notify": true,
   "ghost_suggestions": true,
@@ -108,29 +138,38 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
 - `theme`: `tokyo-night`, `midnight`, `rose-pine`
 - `max_height`: the window grows with the answer up to this height, then scrolls
 - `resident`: `true` keeps the process alive hidden after closing, so the next
-  shortcut press opens it instantly (~80 MB RAM). Config changes apply after
-  a restart: `pkill -f "bin/hermes-spotlight$"` (re-running `./install.sh` does this)
-- `selection_context`: offer text highlighted in other apps as context
+  shortcut press opens it instantly (~80 MB RAM)
+- `system_context`: sends a short machine snapshot (OS, kernel, desktop, CPU,
+  GPU, RAM, running apps) with every question, so the agent knows what it is
+  talking about. Set `false` if you don't want that in your conversations
+- `selection_context`: offer text highlighted in other apps as a context chip
+  (only sent if you ask while the chip is there)
 - `notify`: desktop notification when an answer finishes while the bar is hidden
 - `ghost_suggestions`: grey completion from your own question history
 - `cards`: ask Hermes for native cards (weather) — adds a short format note
   to the system message and a one-line reminder to weather questions
 - `debug`: `true` logs clipboard/selection/focus events to
   `~/.cache/hermes-spotlight/debug.log` (for desktop-specific issues)
-- No config needed for the default setup — it just works.
+
+Config changes apply after a restart of the resident process:
+`pkill -f "bin/hermes-spotlight$"` (re-running `./install.sh` does this).
+No config needed for the default setup — it just works.
 
 ## Bind another key
 
 <details>
 <summary>COSMIC</summary>
 
-Edit `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom.ron`:
+Edit `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`
+(COSMIC 1.8 and older: `custom.ron` in the same folder):
 
 ```ron
 {
     (modifiers: [Alt], key: "space", description: Some("Hermes Spotlight")): Spawn("/home/YOU/.local/bin/hermes-spotlight"),
 }
 ```
+
+`Super+Space` collides with the input-source switch since COSMIC 1.9.
 
 </details>
 
@@ -149,7 +188,8 @@ gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/or
 <details>
 <summary>KDE</summary>
 
-System Settings → Shortcuts → Add Custom → command `~/.local/bin/hermes-spotlight`, bind `Meta+Space`.
+System Settings → Shortcuts → Add Custom → command `~/.local/bin/hermes-spotlight`, bind `Meta+Space`
+(`Alt+Space` is taken by KRunner by default — free it there if you prefer the same key as everywhere else).
 
 </details>
 
@@ -159,7 +199,15 @@ System Settings → Shortcuts → Add Custom → command `~/.local/bin/hermes-sp
 ./uninstall.sh
 ```
 
-(Keeps your config and conversation history — delete `~/.config/hermes-spotlight/` manually if you really want it gone.)
+Removes the program, menu entry and shortcut. Your settings and local
+history stay; to remove them too:
+
+```bash
+rm -rf ~/.config/hermes-spotlight ~/.cache/hermes-spotlight ~/.cache/hermes-spotlight-history
+```
+
+Spotlight conversations themselves are Hermes sessions — manage or delete
+them in the Hermes app or CLI.
 
 ## How it works
 
@@ -167,14 +215,33 @@ System Settings → Shortcuts → Add Custom → command `~/.local/bin/hermes-sp
 Alt+Space ──▶ hermes-spotlight (single-file GTK4 window)
                     │
                     │  POST /api/sessions/{id}/chat/stream (SSE)
+                    │  + system message: machine context, card format
                     ▼
               hermes-agent gateway (127.0.0.1:8642)
                     │  same agent core as CLI / desktop / messaging
                     ▼
-              your tools: terminal, files, browser, skills, memory…
+              your model (local or cloud) + your tools:
+              terminal, files, browser, skills, memory…
 ```
 
 The gateway API server is an official hermes-agent platform adapter (`gateway/platforms/api_server.py`) — any OpenAI-compatible frontend can talk to it. hermes-spotlight uses the native session endpoints, so spotlight conversations show up in your app/CLI session list with full memory.
+
+Some things never reach the agent: app launching, `/status`, ghost text
+and the slash commands run entirely inside the widget.
+
+## Development
+
+```bash
+./verify.sh          # syntax, markdown/highlighter, SSE parser, config,
+                     # launcher, plus headless GTK UI tests
+./verify.sh --full   # additionally an install/uninstall round trip
+```
+
+The UI tests run real GTK widgets on an invisible Broadway display
+(`gtk4-broadwayd`) under their own app id, so a running spotlight is never
+touched. `tests/ui_features.py` drives the widget against a fake gateway:
+stopping, 401/404 recovery, live Markdown, cards, clipboard, selection,
+notifications.
 
 ## License
 
