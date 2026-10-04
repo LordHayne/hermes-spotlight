@@ -392,6 +392,8 @@ def steps(win, app):
     ok(m._card_widget('{"type": "blocks", "blocks": [{"kind": "x"}]}') is None,
        "a blocks card with nothing valid is dropped")
     ok("\"type\": \"blocks\"" in m.CARD_PROMPT, "blueprint is part of the card prompt")
+    ok("do\nnot repeat" in m.CARD_PROMPT or "not repeat" in " ".join(m.CARD_PROMPT.split()),
+       "prompt tells the model not to repeat card data in the text")
     win._new_conversation(); win._prep_ai_bubble()
     win._finish("Here you go.\n\n```card\n" + json.dumps(spec) + "\n```")
     n = len(chats)

@@ -743,6 +743,7 @@ label link:hover {{ text-decoration: underline; }}
 .eventrow {{ padding: 6px 8px; border-radius: 8px;
             background: rgba(255, 255, 255, 0.03); }}
 .eventrow.next {{ background: {t['accent_bg_hover']}; }}
+.eventrow.next .cardsub {{ color: {t['ai_text']}; }}
 .eventtime {{ color: {t['accent']}; font-family: monospace; font-size: 12px;
              min-width: 52px; }}
 .eventtitle {{ color: {t['text']}; font-size: 13px; }}
@@ -937,9 +938,11 @@ def _with_selection(question: str, sel: str) -> str:
 CARD_PROMPT = """\
 Rich cards: the user's spotlight renders some answers as native cards.
 When the user asks for one of the data kinds below (not when it just comes
-up in conversation), answer normally and then append the fenced block for
-it (real data only — never invent values; omit unknown fields). Write the
-texts in the user's language. Never mention the card.
+up in conversation), append the fenced block for it (real data only —
+never invent values; omit unknown fields). The card carries the data: do
+not repeat its list, table or numbers in your text — the text gives the
+takeaway in 1-3 sentences. Write the texts in the user's language. Never
+mention the card.
 
 Weather or forecast — exactly one block:
 ```card
@@ -974,8 +977,9 @@ events: newest first, up to 4.
 
 Anything else — build your own card from blocks, but only when it is clearly
 easier to read than prose (comparisons, specs, scores, standings, rankings,
-checklists, stats, step-by-step status). At most one per answer; keep the
-text short around it. Plain answers need no card.
+checklists, stats, step-by-step status). At most one per answer, and the
+same rule: the data goes into the card, not twice. Plain answers need no
+card.
 ```card
 {"type": "blocks", "icon": "<emoji>", "title": "<title>",
  "subtitle": "<optional>", "value": "<optional big value, right>",
