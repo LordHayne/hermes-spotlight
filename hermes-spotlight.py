@@ -736,6 +736,24 @@ label link:hover {{ text-decoration: underline; }}
 .dayicon {{ font-size: 22px; }}
 .daytemp {{ color: {t['text']}; font-size: 12px; }}
 .daynote {{ color: {t['accent']}; font-size: 10px; }}
+.cardicon2 {{ font-size: 22px; }}
+.cardcount {{ color: {t['accent']}; background: {t['accent_bg_hover']};
+             border-radius: 999px; padding: 1px 9px; font-size: 12px;
+             font-weight: bold; }}
+.eventrow {{ padding: 6px 8px; border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03); }}
+.eventrow.next {{ background: {t['accent_bg_hover']}; }}
+.eventtime {{ color: {t['accent']}; font-family: monospace; font-size: 12px;
+             min-width: 52px; }}
+.eventtitle {{ color: {t['text']}; font-size: 13px; }}
+.pkgeta {{ color: {t['text']}; font-weight: bold; font-size: 14px; }}
+.pkgseg {{ min-height: 6px; border-radius: 3px;
+          background: rgba(255, 255, 255, 0.08); }}
+.pkgseg.done {{ background: {t['accent']}; }}
+.pkgseg.problem {{ background: {t['syntax']['number']}; }}
+.pkgstatus {{ color: {t['text']}; font-size: 13px; }}
+.pkgtime {{ color: {t['placeholder']}; font-family: monospace;
+           font-size: 11px; min-width: 90px; }}
 .statustitle {{ color: {t['accent']}; font-weight: bold; font-size: 12px;
                margin-bottom: 6px; }}
 .statuskey {{ color: {t['placeholder']}; font-size: 12px; }}
@@ -908,9 +926,12 @@ def _with_selection(question: str, sel: str) -> str:
 # --------------------------------------------------------------------------
 CARD_PROMPT = """\
 Rich cards: the user's spotlight renders some answers as native cards.
-When the user asks for weather or forecast data (not when the weather just
-comes up in conversation), answer normally and then append exactly one
-fenced block (real data only, omit unknown fields):
+When the user asks for one of the data kinds below (not when it just comes
+up in conversation), answer normally and then append the fenced block for
+it (real data only — never invent values; omit unknown fields). Write the
+texts in the user's language. Never mention the card.
+
+Weather or forecast — exactly one block:
 ```card
 {"type": "weather", "place": "<city>", "title": "<day/date asked about>",
  "icon": "<icon>", "min": <°C>, "max": <°C>, "summary": "<short conditions>",
@@ -919,26 +940,61 @@ fenced block (real data only, omit unknown fields):
            "best": <true on the nicest day, optional>}]}
 ```
 icon is one of: sun, partly, cloud, fog, showers, rain, storm, snow, wind.
-Up to 7 days. Write texts in the user's language. Never mention the card."""
+Up to 7 days.
+
+Appointments / calendar / agenda — one block per day asked about:
+```card
+{"type": "events", "title": "<day, date>",
+ "events": [{"time": "<HH:MM or 'all day'>", "end": "<HH:MM, optional>",
+             "title": "<what>", "place": "<where, optional>",
+             "next": <true on the next upcoming one, optional>}]}
+```
+Sorted by time, all-day first, up to 10 events. Only from a real calendar
+source you can read — if you have none, say so and send no card.
+
+Package / shipment tracking — one block per shipment (up to 3):
+```card
+{"type": "package", "title": "<what was ordered, or the shop>",
+ "carrier": "<DHL, Post, UPS, …>", "tracking": "<tracking number>",
+ "stage": "<label|shipped|transit|out|delivered|problem>",
+ "status": "<latest status in words>", "eta": "<expected delivery>",
+ "events": [{"time": "<when>", "text": "<scan event>"}]}
+```
+events: newest first, up to 4."""
 
 WEATHER_ICONS = {"sun": "☀️", "clear": "☀️", "partly": "🌤️", "cloud": "☁️",
                  "fog": "🌫️", "showers": "🌦️", "rain": "🌧️", "storm": "⛈️",
                  "snow": "🌨️", "wind": "💨"}
 
 # Models skim past the end of a long system prompt, so questions that
-# mention the weather also carry a one-line reminder in the user turn.
+# touch a card topic also carry a one-line reminder in the user turn.
 # The keyword match is loose on purpose; the reminder is conditional and
-# the model decides whether this really is a weather question.
-_WEATHER_Q = re.compile(
-    r"wetter|weather|forecast|vorhersage|prognose|regn|rain|schnee|snow|"
-    r"temperatur|gewitter|thunder|sonnig|sunny|bewölkt|cloudy", re.I)
-CARD_REMINDER = ("\n\n(Spotlight: only if I am asking for weather or "
-                 "forecast data, end your answer with the weather ```card "
-                 "block from the system message; never mention the card.)")
+# the model decides whether this really asks for that data.
+# ("hermes" is a carrier too, but it is also the agent's name — never a
+# trigger.)
+CARD_TOPICS = [
+    ("weather or forecast data", re.compile(
+        r"wetter|weather|forecast|vorhersage|prognose|regn|rain|schnee|"
+        r"snow|temperatur|gewitter|thunder|sonnig|sunny|bewölkt|cloudy",
+        re.I)),
+    ("my appointments or calendar", re.compile(
+        r"termin|kalender|calendar|meeting|appointment|agenda|schedule|"
+        r"was steht .*an|what's on|whats on|was hab ich", re.I)),
+    ("package or shipment tracking", re.compile(
+        r"paket|packet|package|parcel|sendung|shipment|tracking|"
+        r"lieferung|delivery|zustell|\bdhl\b|\bups\b|\bdpd\b|\bgls\b|"
+        r"fedex|amazon|bestellung", re.I)),
+]
 
 
 def with_card_reminder(question: str) -> str:
-    return question + CARD_REMINDER if _WEATHER_Q.search(question) else question
+    topics = [t for t, rx in CARD_TOPICS if rx.search(question)]
+    if not topics:
+        return question
+    return (f"{question}\n\n(Spotlight: only if I am asking for "
+            f"{' or '.join(topics)}, end your answer with the matching "
+            f"```card block from the system message; never mention the "
+            f"card.)")
 
 
 _CARD_RE = re.compile(r"```card[ \t]*\n?.*?```[ \t]*\n?", re.S)
@@ -1003,7 +1059,94 @@ def _weather_card(d: dict):
     return card
 
 
-CARD_RENDERERS = {"weather": _weather_card}
+def _events_card(d: dict):
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    card.add_css_class("card")
+    head = Gtk.Box(spacing=10)
+    head.append(_lbl("📅", "cardicon2", valign=Gtk.Align.CENTER))
+    head.append(_lbl(d.get("title") or "Calendar", "cardtitle", xalign=0,
+                     hexpand=True, ellipsize=Pango.EllipsizeMode.END,
+                     valign=Gtk.Align.CENTER))
+    events = [e for e in d.get("events") or [] if isinstance(e, dict)][:10]
+    head.append(_lbl(str(len(events)), "cardcount", valign=Gtk.Align.CENTER))
+    card.append(head)
+    if not events:
+        card.append(_lbl("—", "cardsub", xalign=0))
+    for e in events:
+        row = Gtk.Box(spacing=12)
+        row.add_css_class("eventrow")
+        if e.get("next"):
+            row.add_css_class("next")
+        when = str(e.get("time") or "")
+        if e.get("end"):
+            when += f"\n{e['end']}"
+        row.append(_lbl(when, "eventtime", xalign=1, valign=Gtk.Align.CENTER,
+                        justify=Gtk.Justification.RIGHT))
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True,
+                       valign=Gtk.Align.CENTER)
+        text.append(_lbl(e.get("title") or "", "eventtitle", xalign=0,
+                         wrap=True, selectable=True))
+        if e.get("place"):
+            text.append(_lbl(e["place"], "cardsub", xalign=0, wrap=True))
+        row.append(text)
+        card.append(row)
+    return card
+
+
+PACKAGE_STAGES = ["label", "shipped", "transit", "out", "delivered"]
+
+
+def _package_card(d: dict):
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    card.add_css_class("card")
+    stage = d.get("stage")
+    problem = stage == "problem"
+    head = Gtk.Box(spacing=10)
+    head.append(_lbl("⚠️" if problem else "✅" if stage == "delivered"
+                     else "📦", "cardicon2", valign=Gtk.Align.CENTER))
+    titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True,
+                     valign=Gtk.Align.CENTER)
+    titles.append(_lbl(d.get("title") or d.get("carrier") or "Package",
+                       "cardtitle", xalign=0,
+                       ellipsize=Pango.EllipsizeMode.END))
+    sub = " · ".join(str(x) for x in (d.get("carrier"), d.get("tracking"))
+                     if x)
+    if sub:
+        titles.append(_lbl(sub, "cardsub", xalign=0, selectable=True,
+                           ellipsize=Pango.EllipsizeMode.MIDDLE))
+    head.append(titles)
+    if d.get("eta") and stage != "delivered":
+        eta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                      valign=Gtk.Align.CENTER)
+        eta.append(_lbl(d["eta"], "pkgeta", xalign=1))
+        head.append(eta)
+    card.append(head)
+    # progress: one segment per stage, filled up to the current one
+    idx = PACKAGE_STAGES.index(stage) if stage in PACKAGE_STAGES else -1
+    bar = Gtk.Box(spacing=4, homogeneous=True)
+    for i in range(len(PACKAGE_STAGES)):
+        seg = Gtk.Box()
+        seg.add_css_class("pkgseg")
+        if problem:
+            seg.add_css_class("problem")
+        elif i <= idx:
+            seg.add_css_class("done")
+        bar.append(seg)
+    card.append(bar)
+    if d.get("status"):
+        card.append(_lbl(d["status"], "pkgstatus", xalign=0, wrap=True))
+    events = [e for e in d.get("events") or [] if isinstance(e, dict)][:4]
+    for e in events:
+        row = Gtk.Box(spacing=10)
+        row.append(_lbl(e.get("time") or "", "pkgtime", xalign=0))
+        row.append(_lbl(e.get("text") or "", "cardsub", xalign=0,
+                        hexpand=True, wrap=True))
+        card.append(row)
+    return card
+
+
+CARD_RENDERERS = {"weather": _weather_card, "events": _events_card,
+                  "package": _package_card}
 
 
 def _card_widget(src: str):

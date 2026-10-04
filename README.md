@@ -12,7 +12,7 @@ Raycast-style AI launchers are great — but Mac-only and closed-source. On Linu
 
 **Ask**
 - 🔄 **Live answers** — text streams in and is rendered as Markdown while it arrives: code blocks with a copy button, lists, clickable links; tool calls show as `⚙ terminal: …`
-- 🌤️ **Native cards** — answers that fit a card get one (weather first), next to the text
+- 🌤️ **Native cards** — weather, appointments and package tracking come as cards, next to the text
 - 📊 **`/status`** — instant local system card: CPU load/temp, parked cores, RAM, GPU, VRAM, running games — live, no agent round trip
 - 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready
 
@@ -35,10 +35,21 @@ Raycast-style AI launchers are great — but Mac-only and closed-source. On Linu
 
 Some answers deserve more than text. Hermes attaches a small structured
 block to answers that fit a card, and the spotlight renders it natively —
-the text answer always stays, the card sits next to it. Weather is the
-first card type; the format is open for more (calendar, packages, game
-times…). Whether a card appears depends on your model following the
-format — a broken or missing card never breaks the answer.
+the text answer always stays, the card sits next to it.
+
+| Card | Shows | Ask something like |
+|---|---|---|
+| 🌤️ Weather | conditions, range, day tiles, the nicest day highlighted | "what's the weather on Tuesday?" |
+| 📅 Appointments | a day's timeline, the next one highlighted | "what's on today?" |
+| 📦 Package | carrier, tracking number, progress, ETA, latest scans | "where is my DHL package?" |
+
+![appointments and package tracking cards](docs/cards.png)
+
+The data comes from the agent, so a card needs a source Hermes can reach —
+a weather site, your calendar (e.g. via a calendar skill), a carrier's
+tracking page. Whether a card appears also depends on your model following
+the format; a broken or missing card never breaks the answer. New card
+types are one render function plus a few lines of format description.
 
 `/status` is a card too, but fully local: it never asks the agent, so it
 is there in a fraction of a second and refreshes itself while you look.
@@ -146,8 +157,9 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
   (only sent if you ask while the chip is there)
 - `notify`: desktop notification when an answer finishes while the bar is hidden
 - `ghost_suggestions`: grey completion from your own question history
-- `cards`: ask Hermes for native cards (weather) — adds a short format note
-  to the system message and a one-line reminder to weather questions
+- `cards`: ask Hermes for native cards (weather, appointments, packages) —
+  adds the card formats to the system message and a one-line reminder to
+  questions about those topics
 - `debug`: `true` logs clipboard/selection/focus events to
   `~/.cache/hermes-spotlight/debug.log` (for desktop-specific issues)
 

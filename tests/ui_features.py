@@ -306,9 +306,50 @@ def steps(win, app):
     yield from until(lambda: got, 2)
     ok(got and "card" not in got[0] and got[0].endswith("Mehr Text"),
        "copy-answer leaves the card JSON out")
-    ok(m.with_card_reminder("wie wird das Wetter morgen?").endswith(m.CARD_REMINDER)
-       and m.with_card_reminder("erklär mir python") == "erklär mir python",
+    r = m.with_card_reminder
+    ok("weather or forecast" in r("wie wird das Wetter morgen?")
+       and r("erklär mir python") == "erklär mir python",
        "weather questions carry the card reminder, others don't")
+    ok("appointments" in r("welche Termine hab ich morgen?")
+       and "package" in r("wo ist mein DHL Paket?")
+       and r("frag hermes nach dem sinn des lebens") == "frag hermes nach dem sinn des lebens",
+       "reminders per topic; 'hermes' (agent name) is never a carrier trigger")
+    both = r("wo ist mein Paket und wie wird das Wetter?")
+    ok("package" in both and "weather" in both and both.count("(Spotlight:") == 1,
+       "several topics share one reminder")
+
+    # 12 events + package cards
+    ev = m._card_widget(json.dumps({"type": "events", "title": "Mon, Oct 5",
+        "events": [{"time": "all day", "title": "Mom's birthday"},
+                   {"time": "09:30", "end": "10:00", "title": "Standup", "place": "Zoom", "next": True},
+                   {"time": "14:00", "title": "Dentist", "place": "Main St 4"}]}))
+    t = bubble_text(ev) if ev else ""
+    ok(ev is not None and "Mon, Oct 5" in t and "09:30\n10:00" in t and "Zoom" in t
+       and "3" in t, "events card: title, times, places, count")
+    rows = []
+    def walk(x):
+        if x.has_css_class("eventrow"): rows.append(x)
+        c = x.get_first_child()
+        while c is not None: walk(c); c = c.get_next_sibling()
+    walk(ev)
+    ok(len(rows) == 3 and rows[1].has_css_class("next"), "next appointment highlighted")
+    pk = m._card_widget(json.dumps({"type": "package", "title": "Keyboard",
+        "carrier": "DHL", "tracking": "00340434161094042557", "stage": "out",
+        "status": "Out for delivery", "eta": "today 10–14",
+        "events": [{"time": "Oct 5 07:12", "text": "Loaded onto vehicle"}]}))
+    t = bubble_text(pk) if pk else ""
+    segs = []
+    def walk2(x):
+        if x.has_css_class("pkgseg"): segs.append(x)
+        c = x.get_first_child()
+        while c is not None: walk2(c); c = c.get_next_sibling()
+    walk2(pk)
+    ok(pk is not None and "DHL · 00340434161094042557" in t and "today 10–14" in t
+       and "Loaded onto vehicle" in t, "package card: carrier, tracking, eta, events")
+    ok([sg.has_css_class("done") for sg in segs] == [True, True, True, True, False],
+       "package progress filled up to 'out for delivery'")
+    bad = m._card_widget('{"type": "package", "stage": "problem", "events": "x"}')
+    ok(bad is not None, "package card tolerates odd fields (events not a list)")
     ok(sysmsgs and "```card" in sysmsgs[-1] and '"type": "weather"' in sysmsgs[-1],
        "card format is sent to the agent in the system message")
 
