@@ -754,6 +754,14 @@ label link:hover {{ text-decoration: underline; }}
 .pkgstatus {{ color: {t['text']}; font-size: 13px; }}
 .pkgtime {{ color: {t['placeholder']}; font-family: monospace;
            font-size: 11px; min-width: 90px; }}
+.cardvalue {{ color: {t['text']}; font-weight: bold; font-size: 18px; }}
+.statvalue {{ color: {t['text']}; font-weight: bold; font-size: 15px; }}
+.cardchip {{ color: {t['accent']}; background: {t['accent_bg_hover']};
+            border-radius: 999px; padding: 2px 10px; font-size: 12px; }}
+.cardbtn {{ background: {t['accent_bg']}; color: {t['accent']};
+           border: 1px solid {t['entry_border']}; border-radius: 8px;
+           padding: 4px 12px; box-shadow: none; font-size: 12px; }}
+.cardbtn:hover {{ background: {t['accent_bg_hover']}; }}
 .statustitle {{ color: {t['accent']}; font-weight: bold; font-size: 12px;
                margin-bottom: 6px; }}
 .statuskey {{ color: {t['placeholder']}; font-size: 12px; }}
@@ -960,7 +968,35 @@ Package / shipment tracking — one block per shipment (up to 3):
  "status": "<latest status in words>", "eta": "<expected delivery>",
  "events": [{"time": "<when>", "text": "<scan event>"}]}
 ```
-events: newest first, up to 4."""
+events: newest first, up to 4.
+
+Anything else — build your own card from blocks, but only when it is clearly
+easier to read than prose (comparisons, specs, scores, standings, rankings,
+checklists, stats, step-by-step status). At most one per answer; keep the
+text short around it. Plain answers need no card.
+```card
+{"type": "blocks", "icon": "<emoji>", "title": "<title>",
+ "subtitle": "<optional>", "value": "<optional big value, right>",
+ "blocks": [<up to 8 blocks>]}
+```
+blocks:
+{"kind": "text", "text": "<a sentence, **bold** ok>"}
+{"kind": "stats", "items": [{"label": "<caption>", "value": "<big value>",
+  "icon": "<emoji, optional>", "note": "<optional>", "highlight": <bool>}]}
+  (2-6 tiles side by side)
+{"kind": "bars", "items": [{"label": "<name>", "value": <0-100>,
+  "text": "<value as text>"}]}
+{"kind": "list", "items": [{"lead": "<time/rank/number, optional>",
+  "title": "<line>", "sub": "<optional>", "highlight": <bool>}]}
+{"kind": "kv", "items": [["<key>", "<value>"]]}
+{"kind": "table", "columns": ["<col>"], "rows": [["<cell>"]]}
+  (up to 6 columns, 10 rows)
+{"kind": "progress", "steps": ["<step>"], "current": <index>,
+  "problem": <bool>}
+{"kind": "chips", "items": ["<tag>"]}
+{"kind": "actions", "items": [{"label": "<button>",
+  "ask": "<follow-up question it sends>"} or {"label": "<button>",
+  "url": "https://…"}]}  (up to 4)"""
 
 WEATHER_ICONS = {"sun": "☀️", "clear": "☀️", "partly": "🌤️", "cloud": "☁️",
                  "fog": "🌫️", "showers": "🌦️", "rain": "🌧️", "storm": "⛈️",
@@ -1145,14 +1181,236 @@ def _package_card(d: dict):
     return card
 
 
+# --- blocks: the agent's own cards ----------------------------------------
+# A small layout vocabulary (header + up to 8 blocks) that Hermes composes
+# itself whenever structured data reads better as a card than as prose —
+# no new renderer needed per topic. Everything is capped and plain-text
+# (markdown-lite only in "text" blocks); links must be http(s).
+BLOCK_LIMIT, ITEM_LIMIT = 10, 10   # prompt asks for ≤ 8; slack for models
+
+
+def _s(v, n=200) -> str:
+    return str(v if v is not None else "")[:n]
+
+
+def _items(b: dict, n=ITEM_LIMIT) -> list:
+    v = b.get("items")
+    return v[:n] if isinstance(v, list) else []
+
+
+def _open_url(url: str):
+    try:
+        Gio.AppInfo.launch_default_for_uri(url, None)
+    except Exception:
+        pass
+
+
+def _blk_text(b, theme):
+    lbl = Gtk.Label(wrap=True, xalign=0, selectable=True,
+                    wrap_mode=Pango.WrapMode.WORD_CHAR)
+    lbl.add_css_class("eventtitle")
+    try:
+        lbl.set_markup(_md_inline(_s(b.get("text"), 600),
+                                  theme["inline_code_fg"], theme["code_bg"],
+                                  theme["accent"]))
+    except Exception:
+        lbl.set_text(_s(b.get("text"), 600))
+    return lbl
+
+
+def _blk_stats(b, theme):
+    row = Gtk.Box(spacing=6, homogeneous=True)
+    for it in _items(b, 6):
+        if not isinstance(it, dict):
+            continue
+        tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        tile.add_css_class("daytile")
+        if it.get("highlight"):
+            tile.add_css_class("best")
+        tile.append(_lbl(_s(it.get("label"), 40), "dayname",
+                         ellipsize=Pango.EllipsizeMode.END))
+        if it.get("icon"):
+            tile.append(_lbl(_s(it["icon"], 8), "dayicon"))
+        tile.append(_lbl(_s(it.get("value"), 30), "statvalue",
+                         ellipsize=Pango.EllipsizeMode.END))
+        if it.get("note"):
+            tile.append(_lbl(_s(it["note"], 40), "daynote",
+                             ellipsize=Pango.EllipsizeMode.END))
+        row.append(tile)
+    return row
+
+
+def _blk_bars(b, theme):
+    grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+    for i, it in enumerate(x for x in _items(b) if isinstance(x, dict)):
+        grid.attach(_lbl(_s(it.get("label"), 40), "statuskey", xalign=0),
+                     0, i, 1, 1)
+        bar = Gtk.LevelBar(valign=Gtk.Align.CENTER)
+        for name in ("low", "high", "full"):
+            bar.remove_offset_value(name)
+        try:
+            frac = max(0.0, min(1.0, float(it.get("value", 0)) / 100))
+        except (TypeError, ValueError):
+            frac = 0.0
+        bar.set_value(frac)
+        grid.attach(bar, 1, i, 1, 1)
+        grid.attach(_lbl(_s(it.get("text"), 60), "statusval", xalign=0,
+                         hexpand=True, ellipsize=Pango.EllipsizeMode.END),
+                     2, i, 1, 1)
+    return grid
+
+
+def _blk_list(b, theme):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    for it in _items(b):
+        if not isinstance(it, dict):
+            it = {"title": it}
+        row = Gtk.Box(spacing=12)
+        row.add_css_class("eventrow")
+        if it.get("highlight"):
+            row.add_css_class("next")
+        if it.get("lead") not in (None, ""):
+            row.append(_lbl(_s(it["lead"], 20), "eventtime", xalign=1,
+                            valign=Gtk.Align.CENTER))
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True,
+                       valign=Gtk.Align.CENTER)
+        text.append(_lbl(_s(it.get("title")), "eventtitle", xalign=0,
+                         wrap=True, selectable=True))
+        if it.get("sub"):
+            text.append(_lbl(_s(it["sub"]), "cardsub", xalign=0, wrap=True))
+        row.append(text)
+        box.append(row)
+    return box
+
+
+def _blk_kv(b, theme):
+    grid = Gtk.Grid(column_spacing=14, row_spacing=4)
+    for i, it in enumerate(_items(b, 14)):
+        if isinstance(it, dict):
+            it = (it.get("key"), it.get("value"))
+        if not isinstance(it, (list, tuple)) or len(it) < 2:
+            continue
+        grid.attach(_lbl(_s(it[0], 40), "statuskey", xalign=0,
+                         valign=Gtk.Align.START), 0, i, 1, 1)
+        grid.attach(_lbl(_s(it[1], 300), "statusval", xalign=0, wrap=True,
+                         hexpand=True, selectable=True), 1, i, 1, 1)
+    return grid
+
+
+def _blk_table(b, theme):
+    cols = [_s(c, 30) for c in (b.get("columns") or [])][:6]
+    rows = [r for r in (b.get("rows") or []) if isinstance(r, list)][:10]
+    grid = Gtk.Grid(column_spacing=14, row_spacing=4)
+    for j, c in enumerate(cols):
+        grid.attach(_lbl(c, "dayname", xalign=0), j, 0, 1, 1)
+    for i, r in enumerate(rows, start=1):
+        for j, cell in enumerate(r[:max(1, len(cols)) if cols else 6]):
+            grid.attach(_lbl(_s(cell, 80), "statusval", xalign=0, wrap=True,
+                             selectable=True), j, i, 1, 1)
+    return grid
+
+
+def _blk_progress(b, theme):
+    steps = [_s(x, 30) for x in (b.get("steps") or [])][:8]
+    try:
+        cur = int(b.get("current", -1))
+    except (TypeError, ValueError):
+        cur = -1
+    row = Gtk.Box(spacing=4, homogeneous=True)
+    for i, step in enumerate(steps):
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        seg = Gtk.Box()
+        seg.add_css_class("pkgseg")
+        if b.get("problem") and i == cur:
+            seg.add_css_class("problem")
+        elif i <= cur:
+            seg.add_css_class("done")
+        col.append(seg)
+        col.append(_lbl(step, "dayname" if i != cur else "daynote",
+                        ellipsize=Pango.EllipsizeMode.END))
+        row.append(col)
+    return row
+
+
+def _blk_chips(b, theme):
+    flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,
+                       column_spacing=6, row_spacing=6, max_children_per_line=12)
+    for it in _items(b, 16):
+        flow.append(_lbl(_s(it, 40), "cardchip"))
+    return flow
+
+
+def _blk_actions(b, theme):
+    row = Gtk.Box(spacing=6)
+    for it in _items(b, 4):
+        if not isinstance(it, dict) or not it.get("label"):
+            continue
+        btn = Gtk.Button(label=_s(it["label"], 40))
+        btn.add_css_class("cardbtn")
+        if it.get("ask"):
+            # sends a follow-up question (handled by the window's win.ask)
+            btn.set_action_name("win.ask")
+            btn.set_action_target_value(GLib.Variant("s", _s(it["ask"], 300)))
+        elif re.match(r"https?://", _s(it.get("url"))):
+            btn.connect("clicked", lambda _b, u=_s(it["url"], 500): _open_url(u))
+        else:
+            continue
+        row.append(btn)
+    return row
+
+
+BLOCK_KINDS = {"text": _blk_text, "stats": _blk_stats, "bars": _blk_bars,
+               "list": _blk_list, "kv": _blk_kv, "table": _blk_table,
+               "progress": _blk_progress, "chips": _blk_chips,
+               "actions": _blk_actions}
+
+
+def _blocks_card(d: dict, theme: dict = None):
+    theme = theme or THEMES["tokyo-night"]
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    card.add_css_class("card")
+    if d.get("title") or d.get("icon") or d.get("value"):
+        head = Gtk.Box(spacing=10)
+        if d.get("icon"):
+            head.append(_lbl(_s(d["icon"], 8), "cardicon2",
+                             valign=Gtk.Align.CENTER))
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True,
+                         valign=Gtk.Align.CENTER)
+        titles.append(_lbl(_s(d.get("title"), 80), "cardtitle", xalign=0,
+                           ellipsize=Pango.EllipsizeMode.END))
+        if d.get("subtitle"):
+            titles.append(_lbl(_s(d["subtitle"]), "cardsub", xalign=0,
+                               wrap=True))
+        head.append(titles)
+        if d.get("value"):
+            head.append(_lbl(_s(d["value"], 24), "cardvalue",
+                             valign=Gtk.Align.CENTER))
+        card.append(head)
+    blocks = d.get("blocks") if isinstance(d.get("blocks"), list) else []
+    shown = 0
+    for b in blocks:
+        if shown >= BLOCK_LIMIT:
+            break
+        if not isinstance(b, dict) or b.get("kind") not in BLOCK_KINDS:
+            continue            # unknown kinds are skipped, not fatal
+        try:
+            card.append(BLOCK_KINDS[b["kind"]](b, theme))
+            shown += 1
+        except Exception:
+            continue
+    return card if card.get_first_child() is not None else None
+
+
 CARD_RENDERERS = {"weather": _weather_card, "events": _events_card,
-                  "package": _package_card}
+                  "package": _package_card, "blocks": _blocks_card}
 
 
-def _card_widget(src: str):
+def _card_widget(src: str, theme: dict = None):
     """JSON card -> widget, or None (unknown type / broken JSON)."""
     try:
         data = json.loads(src)
+        if data["type"] == "blocks":
+            return _blocks_card(data, theme)
         return CARD_RENDERERS[data["type"]](data)
     except Exception:
         return None
@@ -1166,7 +1424,7 @@ def _md_widgets(text: str, theme: dict) -> list:
         if i % 3 == 1 or not part.strip():
             continue
         if i % 3 == 2 and parts[i - 1] == "card":
-            card = _card_widget(part)
+            card = _card_widget(part, theme)
             if card is not None:
                 widgets.append(card)
             continue
@@ -1485,6 +1743,10 @@ class Spotlight(Gtk.ApplicationWindow):
         self.add_controller(cc)
         self.connect("notify::is-active", self._on_active_changed)
         self.connect("close-request", self._on_close)
+        # follow-up buttons in cards ({"ask": …}) send their question
+        ask = Gio.SimpleAction.new("ask", GLib.VariantType.new("s"))
+        ask.connect("activate", lambda _a, v: self._ask(v.get_string()))
+        self.add_action(ask)
 
         self._autotest_mode = bool(os.environ.get("HERMES_SPOTLIGHT_AUTOTEST"))
         if self._autotest_mode:
@@ -1630,6 +1892,12 @@ class Spotlight(Gtk.ApplicationWindow):
         self._grow()
         GLib.timeout_add(2000, self._refresh_status, bubble)
         return False
+
+    def _ask(self, question: str):
+        if self._busy or not question:
+            return
+        self.entry.set_text(question)
+        self._on_send(force_ask=True)
 
     def _on_copy_key(self, _c, keyval, _kc, state):
         if not (state & Gdk.ModifierType.CONTROL_MASK

@@ -353,6 +353,48 @@ def steps(win, app):
     ok(sysmsgs and "```card" in sysmsgs[-1] and '"type": "weather"' in sysmsgs[-1],
        "card format is sent to the agent in the system message")
 
+    # 13 blocks: the agent's own cards
+    spec = {"type": "blocks", "icon": "🎮", "title": "GPU compare", "subtitle": "1440p",
+            "value": "4070 wins", "blocks": [
+        {"kind": "text", "text": "Close race, **4070** is quieter."},
+        {"kind": "stats", "items": [{"label": "FPS", "value": "142", "highlight": True},
+                                    {"label": "Watt", "value": "200", "note": "less"}]},
+        {"kind": "bars", "items": [{"label": "4070", "value": 92, "text": "92 pts"}]},
+        {"kind": "list", "items": [{"lead": "1", "title": "RTX 4070", "sub": "best value", "highlight": True}, "plain item"]},
+        {"kind": "kv", "items": [["VRAM", "12 GB"], {"key": "TDP", "value": "200 W"}]},
+        {"kind": "table", "columns": ["Card", "Price"], "rows": [["4070", "549 €"], ["7800 XT", "499 €"]]},
+        {"kind": "progress", "steps": ["ordered", "shipped", "here"], "current": 1},
+        {"kind": "chips", "items": ["DLSS", "quiet"]},
+        {"kind": "nonsense", "items": [1]},
+        {"kind": "actions", "items": [{"label": "Details", "ask": "details on the RTX 4070"},
+                                      {"label": "Shop", "url": "https://example.org"},
+                                      {"label": "Evil", "url": "file:///etc/passwd"}]}]}
+    bc = m._card_widget(json.dumps(spec), win.theme)
+    t = bubble_text(bc) if bc else ""
+    ok(bc is not None and all(x in t for x in ("GPU compare", "4070 wins", "142", "92 pts",
+       "best value", "plain item", "12 GB", "200 W", "549 €", "shipped", "DLSS")),
+       "blocks card renders every block kind")
+    kids = list(bc) if bc else []
+    ok(len(kids) == 1 + 9, f"unknown block kinds are skipped ({len(kids)} children)")
+    btns = []
+    def walkb(x):
+        if isinstance(x, Gtk.Button): btns.append(x)
+        c = x.get_first_child()
+        while c is not None: walkb(c); c = c.get_next_sibling()
+    walkb(bc)
+    ok([b.get_label() for b in btns] == ["Details", "Shop"], "only ask/https buttons are created")
+    ok(m._card_widget('{"type": "blocks", "blocks": [{"kind": "x"}]}') is None,
+       "a blocks card with nothing valid is dropped")
+    ok("\"type\": \"blocks\"" in m.CARD_PROMPT, "blueprint is part of the card prompt")
+    win._new_conversation(); win._prep_ai_bubble()
+    win._finish("Here you go.\n\n```card\n" + json.dumps(spec) + "\n```")
+    n = len(chats)
+    btns.clear(); walkb(win._ai_bubble)
+    btns[0].activate()               # "Details" -> win.ask
+    yield from until(lambda: not win._busy and len(chats) > n)
+    ok(len(chats) > n and chats[-1][1] == "details on the RTX 4070",
+       "follow-up button sends its question")
+
     app.release(); win._closed = True; app.quit()
 
 def run(gen):

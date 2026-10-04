@@ -12,7 +12,7 @@ Raycast-style AI launchers are great — but Mac-only and closed-source. On Linu
 
 **Ask**
 - 🔄 **Live answers** — text streams in and is rendered as Markdown while it arrives: code blocks with a copy button, lists, clickable links; tool calls show as `⚙ terminal: …`
-- 🌤️ **Native cards** — weather, appointments and package tracking come as cards, next to the text
+- 🌤️ **Native cards** — weather, appointments and package tracking come as cards — and Hermes builds its own cards from a blueprint whenever a table, comparison or stats read better than prose
 - 📊 **`/status`** — instant local system card: CPU load/temp, parked cores, RAM, GPU, VRAM, running games — live, no agent round trip
 - 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready
 
@@ -48,8 +48,33 @@ the text answer always stays, the card sits next to it.
 The data comes from the agent, so a card needs a source Hermes can reach —
 a weather site, your calendar (e.g. via a calendar skill), a carrier's
 tracking page. Whether a card appears also depends on your model following
-the format; a broken or missing card never breaks the answer. New card
-types are one render function plus a few lines of format description.
+the format; a broken or missing card never breaks the answer.
+
+### Cards Hermes builds itself
+
+Beyond those three templates, Hermes gets a **blueprint**: a small set of
+building blocks it can combine on its own whenever structured data reads
+better as a card than as prose — comparisons, specs, rankings, checklists,
+stats. Nobody has to write a renderer per topic.
+
+![a comparison card Hermes composed from blocks: stat tiles, a table, tags and follow-up buttons](docs/blocks.png)
+
+| Block | Renders as |
+|---|---|
+| `stats` | tiles side by side, one highlighted |
+| `bars` | labelled level bars |
+| `list` | rows with a lead (time, rank, number) and a subtitle |
+| `kv` | key/value pairs |
+| `table` | up to 6 columns × 10 rows |
+| `progress` | step bar with labels, optional problem state |
+| `chips` | tags |
+| `text` | a sentence with **bold** / `code` |
+| `actions` | buttons: a follow-up question that is sent on click, or an https link |
+
+The blueprint lives in the system message the spotlight sends; Hermes
+decides when a card is worth it (at most one per answer). Everything is
+rendered as plain text widgets with size limits, unknown blocks are
+skipped and links must be https.
 
 `/status` is a card too, but fully local: it never asks the agent, so it
 is there in a fraction of a second and refreshes itself while you look.
@@ -157,9 +182,9 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
   (only sent if you ask while the chip is there)
 - `notify`: desktop notification when an answer finishes while the bar is hidden
 - `ghost_suggestions`: grey completion from your own question history
-- `cards`: ask Hermes for native cards (weather, appointments, packages) —
-  adds the card formats to the system message and a one-line reminder to
-  questions about those topics
+- `cards`: native cards — adds the card templates (weather, appointments,
+  packages) and the block blueprint to the system message, plus a one-line
+  reminder to questions about the template topics
 - `debug`: `true` logs clipboard/selection/focus events to
   `~/.cache/hermes-spotlight/debug.log` (for desktop-specific issues)
 
