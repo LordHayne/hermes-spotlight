@@ -165,6 +165,15 @@ if command -v gtk4-broadwayd >/dev/null; then
     [ $UI_RC -ne 0 ] && grep -iv warn "$UI_ERR" | tail -5
     rm -f "$UI_ERR"
 
+    UI_ERR="$(mktemp)"
+    UI_OUT="$(GDK_BACKEND=broadway BROADWAY_DISPLAY="$BW" timeout 60 \
+        /usr/bin/python3 "$HERE/tests/ui_features.py" "$W" 2>"$UI_ERR")"
+    UI_RC=$?
+    echo "$UI_OUT" | grep -E "^(PASS|FAIL)" | sed 's/^/  /'
+    V $UI_RC "UI vs fake gateway: stop, 401/404, live markdown, links, image, selection, notify"
+    [ $UI_RC -ne 0 ] && grep -iv warn "$UI_ERR" | tail -5
+    rm -f "$UI_ERR"
+
     # fast path: a second launch hands over to the resident instance
     export HERMES_SPOTLIGHT_APP_ID="test.spot.verify$$"
     GDK_BACKEND=broadway BROADWAY_DISPLAY="$BW" /usr/bin/python3 "$W" >/dev/null 2>&1 & SPID=$!

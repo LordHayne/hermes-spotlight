@@ -4,7 +4,7 @@
 
 Press `Alt+Space`, ask anything — your local [hermes-agent](https://github.com/NousResearch/hermes-agent) answers with live streaming, tool-call status and Markdown rendering, in a slim translucent bar that feels native to your desktop.
 
-![hermes-spotlight](screenshot.png)
+![hermes-spotlight answering a weather question with a native weather card](docs/weather.png)
 
 ## Why
 
@@ -13,12 +13,36 @@ Raycast-style AI launchers are great — but Mac-only and closed-source. On Linu
 - 🖥️ **100% local** — talks only to `127.0.0.1:8642`, no cloud, no telemetry
 - ⚡ **Instant** — stays resident after first use: re-opens in ~30 ms, no Electron
 - 🎨 **3 themes** — Tokyo Night, Midnight, Rose Pine (or add your own)
-- 📋 **Markdown answers** — code blocks with a copy button, bold, lists; text is selectable
+- 📋 **Markdown answers** — rendered live while streaming: code blocks with a copy button, bold, lists, clickable links; text is selectable
+- 📷 **Screenshots** — `Ctrl+V` an image from the clipboard and ask about it (vision models)
+- ❝ **Highlighted text as context** — select text anywhere, press `Alt+Space`, ask "explain this"; shown as a removable chip, only sent with your question
+- 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready
 - 🚀 **App launcher** — type an app name, Enter starts it; the last row (or Shift+Enter) asks Hermes instead
 - 🔄 **Live streaming** — answer text streams in, tool calls show as `⚙ terminal: …`
 - 🧠 **Session memory** — the conversation survives closing, reboots
-- ⌨️ **Quality of life** — input history (↑/↓), `/new`, `/stop`
+- 📊 **`/status`** — instant local system card: CPU load/temp, parked cores, RAM, GPU, VRAM, running games — live, no agent round trip
+- 👻 **Ghost text** — your most frequent earlier question appears greyed out while you type; `Tab` or `→` takes it
+- ⌨️ **Quality of life** — input history (↑/↓), `/new`, `/stop` or `Ctrl+C` to stop a running answer
 - 🪟 **Logo button** — jump straight to the full Hermes desktop app
+
+## Cards & context
+
+Some answers deserve more than text. Hermes attaches a small structured
+block to answers that fit a card, and the spotlight renders it natively —
+the text answer always stays, the card sits on top. Weather is the first
+card type; the format is open for more (calendar, packages, game times…).
+
+`/status` is a card too, but fully local: it never asks the agent, so it
+is there in a fraction of a second and refreshes itself while you look.
+
+![/status system card](docs/status.png)
+
+Context goes in without copy-paste: highlight text anywhere and press
+`Alt+Space` — it shows up as a chip and is sent with your question.
+`Ctrl+V` attaches a screenshot the same way. While you type, the ghost text
+suggests what you asked before.
+
+![highlighted text and a screenshot as context chips, ghost text completion](docs/context.png)
 
 ## The Vision — the assistant every OS is missing
 
@@ -29,7 +53,7 @@ hermes-spotlight is an attempt at that missing layer for Linux:
 - **One keystroke, always there.** Not an app you open — an overlay your desktop grows, like Spotlight on macOS. You don't "use" it, you just ask.
 - **The agent, not a wrapper.** Behind the bar is a real agent with tools (terminal, files, browser), persistent memory and skills. It doesn't just answer — it executes. Ask it "why is my game stuttering" and it diagnoses your GPU driver state, because it *knows* your OS, GPU, RAM and running apps (system context is sent with every question).
 - **100% local, by architecture.** Not "we respect your privacy" — there is simply no cloud path. The widget talks only to `127.0.0.1`. Your machine context, your conversations, your keys.
-- **Native, not Electron.** ~200 lines of GTK4, stdlib-only client, no bundled Chromium. It should feel like the desktop grew it.
+- **Native, not Electron.** a single-file GTK4 app, stdlib-only client, no bundled Chromium. It should feel like the desktop grew it.
 
 **Where this goes:** quick answers → app launching → system diagnosis → eventually the place where you handle everything that isn't a full app: "clean my shader cache", "why did that crash", "set up the new drive". The bar stays slim; the agent grows.
 
@@ -72,7 +96,11 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
   "theme": "tokyo-night",
   "width": 700,
   "max_height": 600,
-  "resident": true
+  "resident": true,
+  "selection_context": true,
+  "notify": true,
+  "ghost_suggestions": true,
+  "cards": true
 }
 ```
 
@@ -82,6 +110,13 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
 - `resident`: `true` keeps the process alive hidden after closing, so the next
   shortcut press opens it instantly (~80 MB RAM). Config changes apply after
   a restart: `pkill -f "bin/hermes-spotlight$"` (re-running `./install.sh` does this)
+- `selection_context`: offer text highlighted in other apps as context
+- `notify`: desktop notification when an answer finishes while the bar is hidden
+- `ghost_suggestions`: grey completion from your own question history
+- `cards`: ask Hermes for native cards (weather) — adds a short format note
+  to the system message
+- `debug`: `true` logs clipboard/selection/focus events to
+  `~/.cache/hermes-spotlight/debug.log` (for desktop-specific issues)
 - No config needed for the default setup — it just works.
 
 ## Bind another key
@@ -129,7 +164,7 @@ System Settings → Shortcuts → Add Custom → command `~/.local/bin/hermes-sp
 ## How it works
 
 ```
-Alt+Space ──▶ hermes-spotlight (GTK4 window, ~200 lines UI)
+Alt+Space ──▶ hermes-spotlight (single-file GTK4 window)
                     │
                     │  POST /api/sessions/{id}/chat/stream (SSE)
                     ▼

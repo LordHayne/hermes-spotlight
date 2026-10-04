@@ -76,7 +76,7 @@ import uuid
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Pango
+from gi.repository import Gtk, GLib, GObject, Gdk, GdkPixbuf, Gio, Pango
 
 # --------------------------------------------------------------------------
 # Config
@@ -100,6 +100,11 @@ DEFAULT_CONFIG = {
     "system_context": True,             # send OS/hardware context with asks
     "resident": True,                   # hide instead of quit: instant reopen
     "max_height": 600,                  # window grows with content up to this
+    "selection_context": True,          # offer highlighted text as context
+    "notify": True,                     # desktop notification when an answer
+                                        # finishes while the window is hidden
+    "ghost_suggestions": True,          # grey completion from your history
+    "cards": True,                      # native cards (weather) in answers
 }
 
 THEMES = {
@@ -174,7 +179,29 @@ THEMES = {
     },
 }
 
-PLACEHOLDER = "Ask Hermes…   (↑ history, /new, /stop)"
+PLACEHOLDER = "Ask Hermes…   (↑ history, /new, /stop, /status)"
+BUSY_HINT = "Hermes is thinking…   (/stop or Ctrl+C to stop)"
+SEL_MAX = 8000                  # chars of highlighted text sent as context
+
+
+# --------------------------------------------------------------------------
+# Debug log: "debug": true in config.json (or HERMES_SPOTLIGHT_DEBUG=1)
+# appends clipboard/selection/focus events to
+# ~/.cache/hermes-spotlight/debug.log — for desktop-specific issues that
+# headless tests cannot see.
+# --------------------------------------------------------------------------
+DEBUG_LOG = os.path.expanduser("~/.cache/hermes-spotlight/debug.log")
+_debug = bool(os.environ.get("HERMES_SPOTLIGHT_DEBUG"))
+
+
+def _log(msg: str):
+    if not _debug:
+        return
+    try:
+        with open(DEBUG_LOG, "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')}.{int(time.time()*1000)%1000:03d} {msg}\n")
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -288,6 +315,200 @@ _KNOWN_APP_PROCESSES = {
     "obsidian": "Obsidian", "gimp": "GIMP", "kdenlive": "Kdenlive",
     "vlc": "VLC", "mpv": "mpv", "obs": "OBS Studio",
 }
+
+
+# --------------------------------------------------------------------------
+# /status — local system snapshot, no agent round trip
+# --------------------------------------------------------------------------
+def _cpu_ranges(s: str) -> set:
+    """'0-5,12-17' -> {0..5, 12..17}"""
+    out = set()
+    for part in s.strip().split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            out.update(range(int(a), int(b) + 1))
+        elif part:
+            out.add(int(part))
+    return out
+
+
+def _compact_ranges(nums) -> str:
+    """{6..11, 18..23} -> '6–11, 18–23'"""
+    nums, out = sorted(nums), []
+    i = 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append(f"{nums[i]}–{nums[j]}" if j > i else str(nums[i]))
+        i = j + 1
+    return ", ".join(out)
+
+
+def _read(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _cpu_times():
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    idle = v[3] + (v[4] if len(v) > 4 else 0)
+    return idle, sum(v)
+
+
+def _hwmon_temp(names) -> float | None:
+    base = "/sys/class/hwmon"
+    try:
+        for h in sorted(os.listdir(base)):
+            if _read(f"{base}/{h}/name") in names:
+                t = _read(f"{base}/{h}/temp1_input")
+                if t:
+                    return int(t) / 1000
+    except OSError:
+        pass
+    return None
+
+
+STEAM_LIBS = [
+    "~/.local/share/Steam/steamapps",
+    "~/.steam/steam/steamapps",
+    "~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps",
+]
+
+
+def _steam_game_name(appid: str) -> str:
+    for lib in STEAM_LIBS:
+        txt = _read(os.path.expanduser(f"{lib}/appmanifest_{appid}.acf"))
+        m = re.search(r'"name"\s+"([^"]+)"', txt)
+        if m:
+            return m.group(1)
+    return f"Steam app {appid}"
+
+
+def _running_games() -> list:
+    """Steam games (the SteamLaunch reaper carries AppId=…), deduplicated."""
+    ids = []
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+            except OSError:
+                continue
+            if "SteamLaunch" in cmd:
+                m = re.search(r"AppId=(\d+)", cmd)
+                if m and m.group(1) not in ids and m.group(1) != "0":
+                    ids.append(m.group(1))
+    except OSError:
+        pass
+    return [_steam_game_name(i) for i in ids]
+
+
+def _gpu_status() -> dict | None:
+    """NVIDIA via nvidia-smi, else AMD/Intel via sysfs (amdgpu)."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,utilization.gpu,clocks.gr,"
+             "memory.used,memory.total,temperature.gpu,power.draw",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3)
+        if r.returncode == 0 and r.stdout.strip():
+            f = [x.strip() for x in r.stdout.splitlines()[0].split(",")]
+            num = lambda s: float(s) if re.match(r"^[\d.]+$", s) else None
+            return {"name": f[0].replace("NVIDIA GeForce ", ""),
+                    "util": num(f[1]), "clock": num(f[2]),
+                    "vram_used": num(f[3]), "vram_total": num(f[4]),
+                    "temp": num(f[5]), "power": num(f[6])}
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        pass
+    for card in sorted(os.listdir("/sys/class/drm")) if os.path.isdir(
+            "/sys/class/drm") else []:
+        dev = f"/sys/class/drm/{card}/device"
+        busy = _read(f"{dev}/gpu_busy_percent")
+        if not re.match(r"^card\d+$", card) or not busy:
+            continue
+        used, total = _read(f"{dev}/mem_info_vram_used"), \
+            _read(f"{dev}/mem_info_vram_total")
+        clock = re.search(r"(\d+)Mhz \*", _read(f"{dev}/pp_dpm_sclk"))
+        temp = None
+        try:
+            for h in os.listdir(f"{dev}/hwmon"):
+                t = _read(f"{dev}/hwmon/{h}/temp1_input")
+                temp = int(t) / 1000 if t else None
+        except OSError:
+            pass
+        return {"name": "GPU", "util": float(busy),
+                "clock": float(clock.group(1)) if clock else None,
+                "vram_used": int(used) / 2**20 if used else None,
+                "vram_total": int(total) / 2**20 if total else None,
+                "temp": temp, "power": None}
+    return None
+
+
+def collect_status() -> dict:
+    """One snapshot for the /status card. Blocks ~250 ms (CPU load is the
+    difference of two /proc/stat samples) — call it off the UI thread."""
+    i0, t0 = _cpu_times()
+    time.sleep(0.25)
+    i1, t1 = _cpu_times()
+    st = {"cpu_load": 100 * (1 - (i1 - i0) / max(1, t1 - t0))}
+    st["cpu_temp"] = _hwmon_temp({"k10temp", "zenpower", "coretemp"})
+    online = _cpu_ranges(_read("/sys/devices/system/cpu/online") or "0")
+    present = _cpu_ranges(_read("/sys/devices/system/cpu/present") or "0")
+    st["threads"] = (len(online), len(present))
+    st["parked"] = _compact_ranges(present - online)
+    mem = {}
+    for line in _read("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        mem[k] = int(v.split()[0]) if v.split() else 0
+    st["ram"] = ((mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)) / 2**20,
+                 mem.get("MemTotal", 0) / 2**20)
+    st["gpu"] = _gpu_status()
+    st["games"] = _running_games()
+    st["apps"] = _running_apps(6)
+    return st
+
+
+def status_rows(st: dict) -> list:
+    """(label, fraction 0..1 or None, value text) rows for the card."""
+    rows = []
+    cpu = [f"{st['cpu_load']:.0f} %"]
+    if st.get("cpu_temp") is not None:
+        cpu.append(f"{st['cpu_temp']:.0f} °C")
+    on, total = st["threads"]
+    cpu.append(f"{on}/{total} threads" +
+               (f" · {st['parked']} parked" if st["parked"] else ""))
+    rows.append(("CPU", st["cpu_load"] / 100, " · ".join(cpu)))
+    used, total = st["ram"]
+    rows.append(("RAM", used / total if total else None,
+                 f"{used:.1f} / {total:.0f} GB"))
+    g = st.get("gpu")
+    if g:
+        val = [g["name"]]
+        if g["util"] is not None:
+            val.append(f"{g['util']:.0f} %")
+        if g["clock"] is not None:
+            val.append(f"{g['clock']:.0f} MHz")
+        if g["temp"] is not None:
+            val.append(f"{g['temp']:.0f} °C")
+        if g["power"] is not None:
+            val.append(f"{g['power']:.0f} W")
+        rows.append(("GPU", (g["util"] or 0) / 100, " · ".join(val)))
+        if g["vram_used"] is not None and g["vram_total"]:
+            rows.append(("VRAM", g["vram_used"] / g["vram_total"],
+                         f"{g['vram_used'] / 1024:.1f} / "
+                         f"{g['vram_total'] / 1024:.0f} GB"))
+    if st.get("games"):
+        rows.append(("Game", None, ", ".join(st["games"])))
+    if st.get("apps"):
+        rows.append(("Apps", None, ", ".join(st["apps"])))
+    return rows
 
 
 # --------------------------------------------------------------------------
@@ -412,12 +633,14 @@ def match_apps(query: str, apps: list, limit: int = 5) -> list:
 
 
 def load_config() -> dict:
+    global _debug
     cfg = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH) as f:
             cfg.update(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
         pass
+    _debug = _debug or bool(cfg.get("debug"))
     # Write back the merged config: creates it on first run and migrates
     # older configs when new keys appear.
     try:
@@ -485,6 +708,9 @@ spinner {{ padding: 1px; }}
   font-size: 12px;
 }}
 .chipx {{ background: transparent; border: none; padding: 2px; }}
+.chiplabel {{ color: {t['ai_text']}; }}
+label link {{ color: {t['accent']}; }}
+label link:hover {{ text-decoration: underline; }}
 .sugg {{ padding: 6px 12px; border-radius: 8px; margin: 1px 2px; }}
 .sugglabel {{ color: {t['text']}; font-size: 14px; }}
 .sugghint {{ color: {t['placeholder']}; font-size: 11px; }}
@@ -495,6 +721,32 @@ spinner {{ padding: 1px; }}
   border-radius: 8px; border: none; box-shadow: none;
   background: {t['accent_bg']}; color: {t['placeholder']};
 }}
+.answercopy {{ margin: 2px -6px -4px 0; }}
+.ghost {{ color: {t['placeholder']}; font-size: 15px; }}
+.card {{ background: {t['accent_bg']}; border: 1px solid {t['edge']};
+        border-radius: 12px; padding: 12px 14px; margin: 6px 0; }}
+.cardicon {{ font-size: 34px; }}
+.cardtitle {{ color: {t['text']}; font-weight: bold; font-size: 15px; }}
+.cardsub {{ color: {t['placeholder']}; font-size: 12px; }}
+.cardtemp {{ color: {t['text']}; font-weight: bold; font-size: 20px; }}
+.daytile {{ background: rgba(255, 255, 255, 0.03); border-radius: 10px;
+           padding: 6px 4px; }}
+.daytile.best {{ background: {t['accent_bg_hover']}; }}
+.dayname {{ color: {t['placeholder']}; font-weight: bold; font-size: 11px; }}
+.dayicon {{ font-size: 22px; }}
+.daytemp {{ color: {t['text']}; font-size: 12px; }}
+.daynote {{ color: {t['accent']}; font-size: 10px; }}
+.statustitle {{ color: {t['accent']}; font-weight: bold; font-size: 12px;
+               margin-bottom: 6px; }}
+.statuskey {{ color: {t['placeholder']}; font-size: 12px; }}
+.statusval {{ color: {t['ai_text']}; font-size: 12px; }}
+levelbar {{ min-width: 110px; }}
+levelbar trough {{ background: rgba(255, 255, 255, 0.07); border: none;
+                  border-radius: 3px; min-height: 6px; padding: 0; }}
+levelbar block {{ border: none; border-radius: 3px; min-height: 6px; }}
+levelbar block.filled {{ background: {t['accent']}; }}
+levelbar.hot block.filled {{ background: {t['syntax']['number']}; }}
+levelbar block.empty {{ background: transparent; }}
 .copybtn:hover {{ background: {t['accent_bg_hover']}; color: {t['accent']}; }}
 .codeblock {{
   background: {t['code_bg']}; color: {t['code_fg']};
@@ -584,9 +836,18 @@ def _md_inline(text: str, code_fg: str, code_bg: str, accent: str) -> str:
                   rf'foreground="{code_fg}">\1</span>', text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", text)
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)",
-                  rf'<span foreground="{accent}" underline="single">\1</span>',
-                  text)
+    # one pass for [text](url) and bare URLs, so a link's own text is
+    # never linked twice; only http(s) becomes clickable
+    def _link(m):
+        label, url, bare = m.group(1), m.group(2), m.group(3)
+        if bare:
+            return f'<a href="{bare}">{bare}</a>'
+        if re.match(r"https?://", url):
+            return f'<a href="{url}">{label}</a>'
+        return f'<span foreground="{accent}" underline="single">{label}</span>'
+    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)"
+                  r"|(?<![\w\"=/>])(https?://[^\s<]*[^\s<.,;:!?)\]'\"*])",
+                  _link, text)
     lines = []
     for ln in text.split("\n"):
         m = re.match(r"^(#{1,4})\s+(.*)$", ln)
@@ -605,13 +866,151 @@ def _copy_code(btn, code: str):
     GLib.timeout_add(1200, lambda: btn.set_icon_name("edit-copy-symbolic"))
 
 
+def _md_split_point(text: str, start: int) -> int:
+    """Last paragraph break after `start` that lies outside a code fence,
+    or -1. Everything before it can be rendered as Markdown while the rest
+    of the answer is still streaming."""
+    idx = text.rfind("\n\n")
+    while idx > start:
+        if text.count("```", 0, idx) % 2 == 0:
+            return idx
+        idx = text.rfind("\n\n", 0, idx)
+    return -1
+
+
+def ghost_completion(typed: str, history: list) -> str:
+    """Rest of the most frequent (then most recent) earlier question that
+    starts with what is typed — shown greyed out, Tab/→ accepts it."""
+    t = typed.lower()
+    if len(t.strip()) < 2 or t.startswith("/"):
+        return ""
+    counts, last = {}, {}
+    for i, h in enumerate(history):
+        if len(h) > len(typed) and h.lower().startswith(t):
+            counts[h] = counts.get(h, 0) + 1
+            last[h] = i
+    if not counts:
+        return ""
+    best = max(counts, key=lambda h: (counts[h], last[h]))
+    return best[len(typed):]
+
+
+def _with_selection(question: str, sel: str) -> str:
+    """Prepend highlighted text from another app as context."""
+    return (f"Context: text I have highlighted on my screen:\n"
+            f'"""\n{sel}\n"""\n\n{question}')
+
+
+# --------------------------------------------------------------------------
+# Cards: the agent appends a ```card block with JSON (see CARD_PROMPT) and
+# the spotlight renders it natively. Unknown or broken cards are dropped,
+# the text answer always stands on its own.
+# --------------------------------------------------------------------------
+CARD_PROMPT = """\
+Rich cards: the user's spotlight renders some answers as native cards.
+When the user asks about the weather or a forecast, answer normally and
+then append exactly one fenced block (real data only, omit unknown fields):
+```card
+{"type": "weather", "place": "<city>", "title": "<day/date asked about>",
+ "icon": "<icon>", "min": <°C>, "max": <°C>, "summary": "<short conditions>",
+ "days": [{"day": "<short day name>", "icon": "<icon>", "min": <°C>,
+           "max": <°C>, "note": "<1-2 words, optional>",
+           "best": <true on the nicest day, optional>}]}
+```
+icon is one of: sun, partly, cloud, fog, showers, rain, storm, snow, wind.
+Up to 7 days. Write texts in the user's language. Never mention the card."""
+
+WEATHER_ICONS = {"sun": "☀️", "clear": "☀️", "partly": "🌤️", "cloud": "☁️",
+                 "fog": "🌫️", "showers": "🌦️", "rain": "🌧️", "storm": "⛈️",
+                 "snow": "🌨️", "wind": "💨"}
+
+_CARD_RE = re.compile(r"```card[ \t]*\n?.*?```[ \t]*\n?", re.S)
+
+
+def strip_cards(text: str) -> str:
+    """Answer text without card blocks (copy, notifications)."""
+    return _CARD_RE.sub("", text).strip()
+
+
+def _temp(v) -> str:
+    try:
+        return f"{round(float(v))}°"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _lbl(text, css, **kw):
+    lbl = Gtk.Label(label=str(text), **kw)
+    lbl.add_css_class(css)
+    return lbl
+
+
+def _weather_card(d: dict):
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    card.add_css_class("card")
+    head = Gtk.Box(spacing=12)
+    head.append(_lbl(WEATHER_ICONS.get(d.get("icon"), "🌡️"), "cardicon",
+                     valign=Gtk.Align.CENTER))
+    titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True,
+                     valign=Gtk.Align.CENTER)
+    title = " · ".join(str(x) for x in (d.get("place"), d.get("title")) if x)
+    titles.append(_lbl(title or "Weather", "cardtitle", xalign=0,
+                       ellipsize=Pango.EllipsizeMode.END))
+    if d.get("summary"):
+        titles.append(_lbl(d["summary"], "cardsub", xalign=0, wrap=True))
+    head.append(titles)
+    lo, hi = _temp(d.get("min")), _temp(d.get("max"))
+    if lo or hi:
+        head.append(_lbl(f"{lo} → {hi}" if lo and hi else lo or hi,
+                         "cardtemp", valign=Gtk.Align.CENTER))
+    card.append(head)
+    days = [x for x in d.get("days") or [] if isinstance(x, dict)][:7]
+    if days:
+        row = Gtk.Box(spacing=6, homogeneous=True)
+        for day in days:
+            tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            tile.add_css_class("daytile")
+            if day.get("best"):
+                tile.add_css_class("best")
+            tile.append(_lbl(day.get("day", ""), "dayname"))
+            tile.append(_lbl(WEATHER_ICONS.get(day.get("icon"), "🌡️"),
+                             "dayicon"))
+            lo, hi = _temp(day.get("min")), _temp(day.get("max"))
+            tile.append(_lbl(f"{hi} / {lo}" if lo and hi else hi or lo,
+                             "daytemp"))
+            if day.get("note"):
+                tile.append(_lbl(day["note"], "daynote",
+                                 ellipsize=Pango.EllipsizeMode.END))
+            row.append(tile)
+        card.append(row)
+    return card
+
+
+CARD_RENDERERS = {"weather": _weather_card}
+
+
+def _card_widget(src: str):
+    """JSON card -> widget, or None (unknown type / broken JSON)."""
+    try:
+        data = json.loads(src)
+        return CARD_RENDERERS[data["type"]](data)
+    except Exception:
+        return None
+
+
 def _md_widgets(text: str, theme: dict) -> list:
     widgets = []
-    parts = re.split(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", text, flags=re.S)
+    # split -> [text, lang, code, text, lang, code, …, text]
+    parts = re.split(r"```([a-zA-Z0-9_+-]*)\n?(.*?)```", text, flags=re.S)
     for i, part in enumerate(parts):
-        if not part.strip():
+        if i % 3 == 1 or not part.strip():
             continue
-        if i % 2 == 1:
+        if i % 3 == 2 and parts[i - 1] == "card":
+            card = _card_widget(part)
+            if card is not None:
+                widgets.append(card)
+            continue
+        if i % 3 == 2:
             lbl = Gtk.Label(label="", wrap=True, xalign=0,
                             wrap_mode=Pango.WrapMode.WORD_CHAR,
                             selectable=True)
@@ -633,6 +1032,8 @@ def _md_widgets(text: str, theme: dict) -> list:
         else:
             lbl = Gtk.Label(label="", wrap=True, xalign=0, selectable=True,
                             wrap_mode=Pango.WrapMode.WORD_CHAR)
+            # blank lines around a code block/card would render as gaps
+            part = part.strip("\n")
             try:
                 lbl.set_markup(_md_inline(part, theme["inline_code_fg"],
                                           theme["code_bg"], theme["accent"]))
@@ -664,10 +1065,41 @@ def _pixbuf_to_data_url(pb: GdkPixbuf.Pixbuf) -> str | None:
             pb = pb.scale_simple(max(1, round(w * scale)),
                                  max(1, round(h * scale)),
                                  GdkPixbuf.InterpType.BILINEAR)
+        if pb.get_has_alpha():
+            # screenshots are RGBA; the jpeg encoder rejects alpha
+            w, h = pb.get_width(), pb.get_height()
+            flat = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, w, h)
+            flat.fill(0xffffffff)
+            pb.composite(flat, 0, 0, w, h, 0, 0, 1, 1,
+                         GdkPixbuf.InterpType.NEAREST, 255)
+            pb = flat
         ok, buf = pb.save_to_bufferv("jpeg", ["quality"], ["82"])
         if not ok:
             return None
         return "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+    except Exception:
+        return None
+
+
+def _has_image(fmts) -> bool:
+    """Clipboard offers an image: image/* mime types from other apps, or
+    a texture (any subclass) set inside this process."""
+    if fmts is None:
+        return False
+    if any(t.startswith("image/") for t in fmts.get_mime_types() or []):
+        return True
+    return any(GObject.type_is_a(g, Gdk.Texture)
+               for g in fmts.get_gtypes() or [])
+
+
+def _texture_to_data_url(texture: Gdk.Texture) -> str | None:
+    """Clipboard texture (GTK4) -> downscaled jpeg data URL."""
+    try:
+        loader = GdkPixbuf.PixbufLoader()
+        loader.write_bytes(texture.save_to_png_bytes())
+        loader.close()
+        pb = loader.get_pixbuf()
+        return _pixbuf_to_data_url(pb) if pb is not None else None
     except Exception:
         return None
 
@@ -762,6 +1194,16 @@ class Spotlight(Gtk.ApplicationWindow):
         self._status = None
         self._stream_lbl = None
         self._ai_prepped = False
+        # bumped on every send, /stop and /new: callbacks of an older
+        # request see a different value and drop themselves
+        self._gen = 0
+        self._stream_text = ""      # full streamed answer so far
+        self._md_done = 0           # chars of it already rendered as markdown
+        self._live_box = None       # markdown widgets of the streamed part
+        self._stick_bottom = True
+        self._scrolling_programmatic = False
+        self._status_card = None    # live /status bubble while refreshing
+        self._status_widgets = {}
         # streamed deltas are batched (~30 fps) instead of one UI update
         # per token
         self._delta_buf = []
@@ -786,10 +1228,23 @@ class Spotlight(Gtk.ApplicationWindow):
         self.entry.add_controller(ek)
         # live app suggestions while typing
         self.entry.connect("changed", self._on_entry_changed)
-        # Ctrl+V image paste (screenshot tools put PNG into the clipboard)
+        # Ctrl+V image paste (screenshot tools put PNG into the clipboard).
+        # Capture phase: must run before GtkText's own paste shortcut.
+        pk = Gtk.EventControllerKey(
+            propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        pk.connect("key-pressed", self._on_capture_key)
+        self.entry.add_controller(pk)
         self._clip = Gdk.Display.get_default().get_clipboard()
         self._pending_image: str | None = None    # data URL
-        self._clip.connect("changed", self._on_clipboard_changed)
+        self._pending_sel: str | None = None      # highlighted text
+        self._sel_seen = ""         # last highlighted text sent/dismissed
+        self._want_sel = bool(cfg.get("selection_context", True))
+        # On Wayland the selection offer arrives with keyboard focus, which
+        # can be a moment after the window turns active — so also re-read
+        # when it changes shortly after opening.
+        self._prim = Gdk.Display.get_default().get_primary_clipboard()
+        self._sel_until = 0.0
+        self._prim.connect("changed", self._on_prim_changed)
 
         self.spinner = Gtk.Spinner(halign=Gtk.Align.END,
                                    valign=Gtk.Align.CENTER,
@@ -808,6 +1263,18 @@ class Spotlight(Gtk.ApplicationWindow):
         self.app_btn.connect("clicked", self._open_app)
 
         overlay = Gtk.Overlay(child=self.entry)
+        # ghost text: an overlay label whose first part (the typed text) is
+        # transparent, so the grey completion lines up behind the caret
+        self.ghost = Gtk.Label(xalign=0, halign=Gtk.Align.FILL,
+                               valign=Gtk.Align.CENTER, can_target=False,
+                               ellipsize=Pango.EllipsizeMode.END,
+                               visible=False)
+        self.ghost.add_css_class("ghost")
+        self._ghost_rest = ""
+        overlay.add_overlay(self.ghost)
+        self._entry_overlay = overlay
+        self.entry.connect("changed", self._update_ghost)
+        self.entry.connect("notify::cursor-position", self._update_ghost)
         overlay.add_overlay(self.spinner)
         overlay.add_overlay(self.app_btn)
 
@@ -819,6 +1286,9 @@ class Spotlight(Gtk.ApplicationWindow):
         # report the real content height (capped) so _grow can measure it
         self.scroll.set_propagate_natural_height(True)
         self.scroll.set_max_content_height(int(cfg.get("max_height", 600)))
+        vadj = self.scroll.get_vadjustment()
+        vadj.connect("changed", self._on_adj_changed)
+        vadj.connect("value-changed", self._on_adj_value_changed)
         self.scroll.set_visible(False)
 
         # --- app suggestions (launcher mode) --------------------------------
@@ -828,10 +1298,13 @@ class Spotlight(Gtk.ApplicationWindow):
         self.sugg_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                                 margin_top=4, visible=False)
         self.sugg_rows = []
+        self.chip_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                spacing=6, margin_top=6, visible=False)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.add_css_class("spot")
         box.append(overlay)
+        box.append(self.chip_box)
         box.append(self.sugg_box)
         box.append(self.scroll)
         self.set_child(box)
@@ -844,6 +1317,12 @@ class Spotlight(Gtk.ApplicationWindow):
         kc = Gtk.EventControllerKey()
         kc.connect("key-pressed", self._on_key)
         self.add_controller(kc)
+        # Ctrl+C copies text selected in an answer, whichever widget has
+        # the keyboard focus (a mouse selection leaves it in the entry)
+        cc = Gtk.EventControllerKey(
+            propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        cc.connect("key-pressed", self._on_copy_key)
+        self.add_controller(cc)
         self.connect("notify::is-active", self._on_active_changed)
         self.connect("close-request", self._on_close)
 
@@ -867,7 +1346,7 @@ class Spotlight(Gtk.ApplicationWindow):
     def _load_history(self) -> list:
         try:
             with open(self.cfg["history_file"]) as f:
-                return [l.rstrip("\n") for l in f if l.strip()][-100:]
+                return [l.rstrip("\n") for l in f if l.strip()][-500:]
         except OSError:
             return []
 
@@ -876,7 +1355,7 @@ class Spotlight(Gtk.ApplicationWindow):
             os.makedirs(os.path.dirname(self.cfg["history_file"]),
                         exist_ok=True)
             with open(self.cfg["history_file"], "w") as f:
-                f.write("\n".join(self._hist[-100:]))
+                f.write("\n".join(self._hist[-500:]))
         except OSError:
             pass
 
@@ -894,87 +1373,260 @@ class Spotlight(Gtk.ApplicationWindow):
             return True
         return False
 
-    # ------------------------------------------------------ image paste
-    def _on_clipboard_changed(self, *_):
-        """Track clipboard so Ctrl+V knows an image is available."""
-        fmt = self._clip.get_formats()
-        self._clip_has_image = fmt.contain_gtype(GdkPixbuf.Pixbuf) \
-            if fmt else False
+    # ------------------------------------------------------- ghost text
+    def _update_ghost(self, *_):
+        text = self.entry.get_text()
+        rest = ""
+        if (self.cfg.get("ghost_suggestions", True)
+                and self.entry.get_position() == len(text)
+                and not self.entry.get_selection_bounds()):
+            rest = ghost_completion(text, self._hist)
+        self._ghost_rest = rest
+        if not rest:
+            self.ghost.set_visible(False)
+            return
+        # line the label up with the entry's text area
+        txt = self.entry.get_first_child()
+        while txt is not None and not isinstance(txt, Gtk.Text):
+            txt = txt.get_next_sibling()
+        ok, r = (txt.compute_bounds(self._entry_overlay) if txt is not None
+                 else (False, None))
+        typed_w = self.ghost.create_pango_layout(text).get_pixel_size()[0]
+        if not ok or r.get_width() < 1 or typed_w > r.get_width() - 20:
+            self._ghost_rest = ""       # text scrolled: no reliable position
+            self.ghost.set_visible(False)
+            return
+        self.ghost.set_margin_start(int(r.get_x()))
+        self.ghost.set_margin_end(max(0, int(self._entry_overlay.get_width()
+                                             - r.get_x() - r.get_width())))
+        self.ghost.set_markup(f'<span alpha="1">{html.escape(text)}</span>'
+                              f'{html.escape(rest)}')
+        self.ghost.set_visible(True)
 
-    def _on_paste_key(self, ctrl, keyval, _kc, state):
-        """Ctrl+V: if the clipboard holds an image, attach it as vision
-        input instead of pasting text."""
-        if keyval in (Gdk.KEY_v, Gdk.KEY_V) and \
-                state & Gdk.ModifierType.CONTROL_MASK:
-            if getattr(self, "_clip_has_image", False):
-                self._attach_clipboard_image()
-                return True
+    # ------------------------------------------------------- /status card
+    def _show_status(self):
+        title = Gtk.Label(label="System", xalign=0)
+        title.add_css_class("statustitle")
+        grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+        bubble = self._bubble([title, grid], "msg-ai")
+        self._status_card = (bubble, grid)
+        self._status_widgets = {}
+        self._scroll_down(force=True)
+        self._refresh_status(bubble)
+
+    def _refresh_status(self, bubble):
+        """Collect off the UI thread, fill in, repeat every 2 s while this
+        card is the live one (a new question or /new freezes it)."""
+        if self._closed or not self._status_card or \
+                self._status_card[0] is not bubble:
+            return False
+        if not self.get_visible():
+            GLib.timeout_add(2000, self._refresh_status, bubble)
+            return False
+
+        def work():
+            try:
+                rows = status_rows(collect_status())
+            except Exception as e:
+                rows = [("⚠", None, f"status failed: {e}")]
+            GLib.idle_add(self._fill_status, bubble, rows)
+        threading.Thread(target=work, daemon=True).start()
         return False
 
-    def _attach_clipboard_image(self):
+    def _fill_status(self, bubble, rows):
+        if not self._status_card or self._status_card[0] is not bubble:
+            return False
+        grid = self._status_card[1]
+        if [r[0] for r in rows] != list(self._status_widgets):
+            child = grid.get_first_child()          # rows changed: rebuild
+            while child is not None:
+                nxt = child.get_next_sibling()
+                grid.remove(child)
+                child = nxt
+            self._status_widgets = {}
+            for i, (key, frac, _val) in enumerate(rows):
+                k = Gtk.Label(label=key, xalign=0)
+                k.add_css_class("statuskey")
+                grid.attach(k, 0, i, 1, 1)
+                bar = None
+                if frac is not None:
+                    bar = Gtk.LevelBar(valign=Gtk.Align.CENTER)
+                    for name in ("low", "high", "full"):
+                        bar.remove_offset_value(name)
+                    grid.attach(bar, 1, i, 1, 1)
+                v = Gtk.Label(xalign=0, selectable=True, hexpand=True,
+                              ellipsize=Pango.EllipsizeMode.END)
+                v.add_css_class("statusval")
+                grid.attach(v, 2 if bar else 1, i, 1 if bar else 2, 1)
+                self._status_widgets[key] = (bar, v)
+        for key, frac, val in rows:
+            bar, v = self._status_widgets[key]
+            if bar is not None:
+                frac = max(0.0, min(1.0, frac or 0.0))
+                bar.set_value(frac)
+                (bar.add_css_class if frac > 0.85
+                 else bar.remove_css_class)("hot")
+            v.set_text(val)
+        self._grow()
+        GLib.timeout_add(2000, self._refresh_status, bubble)
+        return False
+
+    def _on_copy_key(self, _c, keyval, _kc, state):
+        if not (state & Gdk.ModifierType.CONTROL_MASK
+                and keyval in (Gdk.KEY_c, Gdk.KEY_C)):
+            return False
+        text = self._selected_answer_text()
+        _log(f"copy key: focus={type(self.get_focus()).__name__}"
+             f" selected={len(text)} chars")
+        if not text:
+            return False                # entry copy / Ctrl+C stop
+        self.get_clipboard().set_content(
+            Gdk.ContentProvider.new_for_value(text))
+        return True
+
+    def _selected_answer_text(self) -> str:
+        """Text selected in the conversation (first label with a
+        selection — GTK keeps one selection at a time per click)."""
+        stack = [self.flow]
+        while stack:
+            w = stack.pop()
+            if isinstance(w, Gtk.Label) and w.get_selectable():
+                has, start, end = w.get_selection_bounds()
+                if has and start != end:
+                    a, b = sorted((start, end))
+                    return w.get_text()[a:b]
+            child = w.get_last_child()
+            while child is not None:
+                stack.append(child)
+                child = child.get_prev_sibling()
+        return ""
+
+    # ------------------------------------------------- context chips
+    # Attachments shown as chips below the entry: a pasted image (vision
+    # input) and/or text highlighted in another app. Both are sent with the
+    # next question and can be removed with their ✕.
+    def _on_capture_key(self, _c, keyval, _kc, state):
+        """Entry keys seen before GtkText handles them.
+        Tab/→ at the end: accept the ghost completion.
+        Ctrl+V: if the clipboard holds an image, attach it instead of
+        pasting text. Ctrl+C while answering (nothing selected): stop."""
+        if (self._ghost_rest and keyval in (Gdk.KEY_Tab, Gdk.KEY_Right,
+                                            Gdk.KEY_KP_Right)
+                and not state & (Gdk.ModifierType.CONTROL_MASK
+                                 | Gdk.ModifierType.SHIFT_MASK)):
+            self.entry.set_text(self.entry.get_text() + self._ghost_rest)
+            self.entry.set_position(-1)
+            return True
+        if not state & Gdk.ModifierType.CONTROL_MASK:
+            return False
+        _log(f"ctrl key {Gdk.keyval_name(keyval)} state={int(state)}")
+        if keyval in (Gdk.KEY_v, Gdk.KEY_V):
+            return self._paste_image()
+        if (keyval in (Gdk.KEY_c, Gdk.KEY_C) and self._busy
+                and not self.entry.get_selection_bounds()):
+            self._stop_stream()
+            return True
+        return False
+
+    def _paste_image(self) -> bool:
+        fmts = self._clip.get_formats()
+        _log(f"paste: clipboard formats={fmts.to_string() if fmts else None}"
+             f" local={self._clip.is_local()}")
+        if not _has_image(fmts):
+            return False
+
         def _done(clip, res):
             try:
                 texture = clip.read_texture_finish(res)
-            except Exception:
-                return
-            if texture is None:
-                return
-            pb = Gdk.pixbuf_get_from_texture(texture) \
-                if hasattr(Gdk, "pixbuf_get_from_texture") else None
-            if pb is None:
-                # download_texture fallback
-                try:
-                    dl = texture.download()
-                    loader = GdkPixbuf.PixbufLoader()
-                    loader.write_bytes(dl.get_bytes())
-                    loader.close()
-                    pb = loader.get_pixbuf()
-                except Exception:
-                    return
-            data = _pixbuf_to_data_url(pb)
+            except Exception as e:
+                _log(f"paste: read_texture failed: {e!r}")
+                texture = None
+            data = _texture_to_data_url(texture) if texture else None
             if data:
                 self._pending_image = data
-                GLib.idle_add(self._show_image_chip)
+                self._refresh_chips()
+            else:
+                self._show_hint("⚠ Could not read the image from the clipboard")
         self._clip.read_texture_async(None, _done)
+        return True
 
-    def _show_image_chip(self):
-        """Small thumbnail chip below the entry showing the attached image."""
-        if getattr(self, "img_chip", None) is not None:
-            self.img_chip.unparent()
-            self.img_chip = None
-        if self._pending_image is None:
-            return False
-        pb = _data_url_to_pixbuf(self._pending_image, 48)
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                      margin_top=4)
-        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                       margin_top=4)
-        chip.add_css_class("imgchip")
-        if pb is not None:
-            chip.append(Gtk.Image.new_from_pixbuf(pb))
-        lbl = Gtk.Label(label="screenshot attached")
-        chip.append(lbl)
-        x = Gtk.Button(icon_name="window-close-symbolic")
-        x.add_css_class("chipx")
-        x.set_tooltip_text("Remove image")
-        x.connect("clicked", lambda *_: self._remove_image())
-        chip.append(x)
-        self.img_chip = chip
-        # insert directly after the overlay (before suggestions/answers)
-        self.get_child().get_first_child()  # .spot box
-        spot = self.get_child()
-        spot.insert_child_after(chip, spot.get_first_child())
-        self._grow(30)
+    def _offer_selection(self):
+        """Read the primary selection (text highlighted anywhere) and offer
+        it as a context chip. Skips our own selections and text the user
+        already sent or dismissed."""
+        prim = self._prim
+        fmts = prim.get_formats()
+        _log(f"selection: active={self.is_active()} local={prim.is_local()}"
+             f" formats={fmts.to_string() if fmts else None}")
+        if prim.is_local():
+            self.entry.select_region(0, -1)
+            return
+
+        def _done(clip, res):
+            try:
+                text = (clip.read_text_finish(res) or "").strip()
+            except Exception as e:
+                _log(f"selection: read_text failed: {e!r}")
+                text = ""
+            _log(f"selection: got {len(text)} chars, seen={text == self._sel_seen}")
+            if len(text) >= 2 and text != self._sel_seen:
+                self._pending_sel = text[:SEL_MAX]
+                self._refresh_chips()
+            # only now: selecting entry text takes over the primary selection
+            self.entry.select_region(0, -1)
+        prim.read_text_async(None, _done)
+
+    def _on_prim_changed(self, *_):
+        _log(f"selection changed (active={self.is_active()})")
+        if (self.is_active() and time.time() < self._sel_until
+                and self.cfg.get("selection_context", True)):
+            self._offer_selection()
+
+    def _drop_image(self):
+        self._pending_image = None
+        self._refresh_chips()
+        self.entry.grab_focus()
+
+    def _drop_sel(self):
+        self._sel_seen = self._pending_sel or ""
+        self._pending_sel = None
+        self._refresh_chips()
+        self.entry.grab_focus()
+
+    def _refresh_chips(self):
+        child = self.chip_box.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self.chip_box.remove(child)
+            child = nxt
+        if self._pending_image:
+            pb = _data_url_to_pixbuf(self._pending_image, 32)
+            icon = Gtk.Image.new_from_pixbuf(pb) if pb is not None else None
+            self._add_chip(icon, "screenshot attached", "Remove image",
+                           self._drop_image)
+        if self._pending_sel:
+            one_line = " ".join(self._pending_sel.split())
+            label = "❝ " + (one_line[:48] + "…" if len(one_line) > 48
+                            else one_line)
+            self._add_chip(None, label, "Don't send the highlighted text",
+                           self._drop_sel)
+        self.chip_box.set_visible(self.chip_box.get_first_child() is not None)
+        self._grow()
         return False
 
-    def _remove_image(self):
-        self._pending_image = None
-        chip = getattr(self, "img_chip", None)
-        if chip is not None:
-            chip.unparent()
-            self.img_chip = None
-            self._grow(-30)
-        self.entry.grab_focus()
+    def _add_chip(self, icon, label, tooltip, on_remove):
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        chip.add_css_class("imgchip")
+        if icon is not None:
+            chip.append(icon)
+        lbl = Gtk.Label(label=label, ellipsize=Pango.EllipsizeMode.END)
+        lbl.add_css_class("chiplabel")
+        chip.append(lbl)
+        x = Gtk.Button(icon_name="window-close-symbolic", tooltip_text=tooltip)
+        x.add_css_class("chipx")
+        x.connect("clicked", lambda *_: on_remove())
+        chip.append(x)
+        self.chip_box.append(chip)
 
     # ------------------------------------------------------ launcher mode
     def _on_entry_changed(self, *_):
@@ -1107,6 +1759,12 @@ class Spotlight(Gtk.ApplicationWindow):
             return
         if self.is_active():
             self.entry.grab_focus()
+            # the primary selection is only readable once we have focus
+            _log(f"window active, want_sel={self._want_sel}")
+            if self._want_sel:
+                self._want_sel = False
+                self._sel_until = time.time() + 2.0
+                self._offer_selection()
         elif time.time() - self._t0 > 1.5 and not self._busy:
             self.close()
 
@@ -1117,6 +1775,9 @@ class Spotlight(Gtk.ApplicationWindow):
             # stay alive hidden: the next shortcut press only re-shows the
             # window (see _activate_running_instance). A running answer
             # keeps streaming into the hidden window.
+            if self._pending_sel:
+                self._pending_sel = None      # re-read fresh on next open
+                self._refresh_chips()
             self.set_visible(False)
             return True
         self._closed = True
@@ -1127,9 +1788,15 @@ class Spotlight(Gtk.ApplicationWindow):
         """Show the resident window again, ready for the next question."""
         self._t0 = time.time()
         self._apps = build_app_index()        # cheap: cached, 15 min TTL
+        self._want_sel = bool(self.cfg.get("selection_context", True))
+        self.get_application().withdraw_notification("answer")
         self.present()
         self.entry.grab_focus()
-        self.entry.select_region(0, -1)
+        # selecting our own entry text would take over the primary
+        # selection before _offer_selection could read it (it selects
+        # the entry itself once done)
+        if not self._want_sel:
+            self.entry.select_region(0, -1)
 
     def _open_app(self, *_):
         try:
@@ -1140,6 +1807,16 @@ class Spotlight(Gtk.ApplicationWindow):
         except Exception:
             pass
         self.close()
+
+    def _notify(self, content):
+        """Desktop notification for an answer that finished while the
+        window was hidden; clicking it re-opens the spotlight."""
+        body = " ".join(re.sub(r"[`*#>\[\]]", "",
+                               strip_cards(content)).split())
+        n = Gio.Notification.new("Hermes answered")
+        n.set_body(body[:180] + ("…" if len(body) > 180 else ""))
+        n.set_default_action("app.show")
+        self.get_application().send_notification("answer", n)
 
     # ------------------------------------------------------------- session
     def _save_session(self, sid: str):
@@ -1200,30 +1877,91 @@ class Spotlight(Gtk.ApplicationWindow):
             return False
         status = Gtk.Label(label="", xalign=0)
         status.add_css_class("toolstatus")
+        # finished paragraphs are rendered as markdown into live_box while
+        # the unfinished tail streams into stream_lbl as plain text
+        live_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         stream_lbl = Gtk.Label(label="", wrap=True, xalign=0, selectable=True,
                                wrap_mode=Pango.WrapMode.WORD_CHAR)
-        b = self._bubble([status, stream_lbl], "msg-ai")
+        b = self._bubble([status, live_box, stream_lbl], "msg-ai")
         self._status, self._stream_lbl, self._ai_bubble = status, stream_lbl, b
+        self._live_box = live_box
         self._ai_prepped = True
+        self._render_stream()
         return False
 
+    def _render_stream(self):
+        lbl = self._stream_lbl
+        if lbl is None:
+            return
+        text = self._stream_text
+        cut = _md_split_point(text, self._md_done)
+        if cut > self._md_done:
+            for w in _md_widgets(text[self._md_done:cut], self.theme):
+                self._live_box.append(w)
+            self._md_done = cut + 2
+        tail = text[self._md_done:]
+        open_card = tail.rfind("```card")
+        if open_card >= 0 and tail.count("```", open_card) == 1:
+            tail = tail[:open_card].rstrip()      # JSON still streaming
+        lbl.set_text(tail)
+        lbl.set_visible(bool(tail))
+
     def _render_ai_final(self, text):
-        b = getattr(self, "_ai_bubble", None)
+        b = self._ai_bubble
         if b is None:
             return
+        full = text
         b.remove(self._status)
         b.remove(self._stream_lbl)
+        # keep the paragraphs already rendered while streaming when the
+        # final text agrees with them, so the answer does not flicker
+        done = self._stream_text[:self._md_done]
+        if self._md_done and text.startswith(done):
+            text = text[self._md_done:]
+        else:
+            child = self._live_box.get_first_child()
+            while child is not None:
+                nxt = child.get_next_sibling()
+                self._live_box.remove(child)
+                child = nxt
         for w in _md_widgets(text, self.theme):
-            b.append(w)
+            self._live_box.append(w)
+        # copy the whole answer (markdown source) in one click
+        btn = Gtk.Button(icon_name="edit-copy-symbolic", halign=Gtk.Align.END,
+                         tooltip_text="Copy answer")
+        btn.add_css_class("copybtn")
+        btn.add_css_class("answercopy")
+        btn.connect("clicked", _copy_code, strip_cards(full))
+        b.append(btn)
 
-    def _scroll_down(self):
-        adj = self.scroll.get_vadjustment()
-        adj.set_value(adj.get_upper() - adj.get_page_size())
+    def _scroll_down(self, force=False):
+        # Relayout happens after this returns, so instead of setting the
+        # value now (stale upper bound), the adjustment's "changed" signal
+        # applies the final position while _stick_bottom is set. Only a
+        # new question forces it back on — a user who scrolled up to read
+        # stays where they are while the answer streams.
+        if force:
+            self._stick_bottom = True
+
+    def _on_adj_changed(self, adj):
+        target = adj.get_upper() - adj.get_page_size()
+        if self._stick_bottom and abs(adj.get_value() - target) > 0.5:
+            self._scrolling_programmatic = True
+            adj.set_value(target)
+
+    def _on_adj_value_changed(self, adj):
+        if self._scrolling_programmatic:
+            self._scrolling_programmatic = False
+            return
+        # user moved the scrollbar: pin only while they're at the bottom
+        at_bottom = adj.get_value() >= adj.get_upper() - adj.get_page_size() - 4
+        self._stick_bottom = at_bottom
 
     def _grow(self, *_):
         """Size the window to its content as GTK measures it (entry,
-        suggestions, conversation), capped at max_height. The scrolled
-        window propagates its natural height, capped by its own max."""
+        suggestions, conversation), capped at max_height. Past the cap
+        the scrolled window scrolls; stick-to-bottom keeps the newest
+        text in view."""
         w = int(self.cfg.get("width", 700))
         self.scroll.set_visible(self.flow.get_first_child() is not None)
         h = self.get_child().measure(Gtk.Orientation.VERTICAL, w)[1]
@@ -1237,7 +1975,7 @@ class Spotlight(Gtk.ApplicationWindow):
         self.spinner.set_visible(on)
         if on:
             self.spinner.start()
-            self.entry.set_placeholder_text(hint or "Hermes is thinking…")
+            self.entry.set_placeholder_text(hint or BUSY_HINT)
         else:
             self.spinner.stop()
             self.entry.set_placeholder_text(PLACEHOLDER)
@@ -1246,16 +1984,32 @@ class Spotlight(Gtk.ApplicationWindow):
         """Non-busy inline hint (missing key etc.) — visible, grows window."""
         if self._closed:
             return
-        if getattr(self, "_ai_bubble", None) is None:
+        if self._ai_bubble is None:
             self._prep_ai_bubble()
         self._set_tool_status(text)
         self._grow()
-        self._scroll_down()
+        self._scroll_down(force=True)
 
     # --------------------------------------------------------------- send
     def _on_send(self, force_ask=False, *_):
         text = self.entry.get_text().strip()
-        if not text or self._busy:
+        low = text.lower()
+        # slash commands first: /stop must work while an answer is running
+        if low in ("/stop", "/stopp"):
+            self.entry.set_text("")
+            self._stop_stream()
+            return
+        if low in ("/new", "/neu"):
+            self.entry.set_text("")
+            self._new_conversation()
+            return
+        image, sel = self._pending_image, self._pending_sel
+        if self._busy or not (text or image or sel):
+            return
+        if low in ("/status", "/system"):
+            self.entry.set_text("")
+            self._show_suggestions([])
+            self._show_status()
             return
         # Launcher mode: Enter launches the selected/first app match.
         # Shift+Enter always asks Hermes instead.
@@ -1266,50 +2020,59 @@ class Spotlight(Gtk.ApplicationWindow):
             return
         self._show_suggestions([])
         if not self.key:
+            self.key = load_api_key(load_config())    # added since start?
+        if not self.key:
             self._show_hint("⚠ No API key — set api_key in "
                             "~/.config/hermes-spotlight/config.json or "
                             "API_SERVER_KEY in ~/.hermes/.env")
             return
-        low = text.lower()
-        if low in ("/new", "/neu"):
-            self.entry.set_text("")
-            self._new_conversation()
-            return
-        if low in ("/stop", "/stopp"):
-            self.entry.set_text("")
-            self._stop_stream()
-            return
-        self._hist.append(text)
-        self._hist_idx = len(self._hist)
-        self._save_history()
+        if text:
+            self._hist.append(text)
+            self._hist_idx = len(self._hist)
+            self._save_history()
+        question = text or ("What is on this screenshot?" if image
+                            else "Explain this.")
+        message = _with_selection(question, sel) if sel else question
+        if sel:
+            self._sel_seen = sel
         self.entry.set_text("")
-        image = self._pending_image
-        self._pending_image = None
-        chip = getattr(self, "img_chip", None)
-        if chip is not None:
-            chip.unparent()
-            self.img_chip = None
-        # per-send state: fresh AI bubble, fresh growth tracker,
-        # stale widget refs cleared (old bubbles may be removed already)
+        self._pending_image = self._pending_sel = None
+        self._refresh_chips()
+        # per-send state: fresh AI bubble, fresh stream buffer, stale
+        # widget refs cleared (old bubbles may be removed already)
+        self._gen += 1
+        self._status_card = None        # freeze a live /status card
+        self._drain_deltas()            # late deltas of a stopped answer
         self._ai_bubble = None
         self._status = None
         self._stream_lbl = None
+        self._live_box = None
         self._ai_prepped = False
-        self._set_user_bubble(text + ("  📷" if image else ""))
+        self._stream_text = ""
+        self._md_done = 0
+        self._set_user_bubble(question + ("  📷" if image else "")
+                              + ("  ❝" if sel else ""))
         self._grow()
+        self._scroll_down(force=True)
         self._set_busy(True)
-        threading.Thread(target=self._worker, args=(text, image),
+        threading.Thread(target=self._worker,
+                         args=(message, image, self._gen),
                          daemon=True).start()
 
     def _new_conversation(self):
-        self._stop_stream()
+        self._stop_stream(note=None)
+        self._gen += 1
+        self._status_card = None
         self.session_id = None
         # clear widget refs — the flow children are removed below, stale
         # refs would swallow later hints/errors into removed widgets
         self._ai_bubble = None
         self._status = None
         self._stream_lbl = None
+        self._live_box = None
         self._ai_prepped = False
+        self._stream_text = ""
+        self._md_done = 0
         self._save_session("")
         child = self.flow.get_first_child()
         while child is not None:
@@ -1320,15 +2083,34 @@ class Spotlight(Gtk.ApplicationWindow):
         self._set_busy(False)
         self.entry.set_placeholder_text("New conversation — ask anything…")
 
-    def _stop_stream(self):
-        if self._stream is not None:
-            self._stream.stop()
-            self._set_busy(False)
+    def _stop_stream(self, note="⏹ Stopped"):
+        """Stop the running answer. Closing the SSE connection makes the
+        gateway interrupt the agent; whatever streamed in so far stays,
+        rendered, with `note` appended."""
+        if not self._busy:
+            return
+        self._gen += 1                  # silence the worker's callbacks
+        handle, self._stream = self._stream, None
+        if handle is not None:
+            handle.stop()
+        self._set_busy(False)
+        if note:
+            self._finish_interrupted(note)
 
-    def _worker(self, text, image=None):
+    def _if_gen(self, gen, fn, *args):
+        """Idle callback guard: run fn only if its request is current."""
+        if gen == self._gen:
+            fn(*args)
+        return False
+
+    def _worker(self, text, image=None, gen=0):
+        def post(fn, *args):
+            GLib.idle_add(self._if_gen, gen, fn, *args)
+
         attempts = 6
+        recovered = set()               # one 404/401 recovery each
         for i in range(1, attempts + 1):
-            if self._closed:
+            if self._closed or gen != self._gen:
                 return
             try:
                 if not self.session_id:
@@ -1336,77 +2118,105 @@ class Spotlight(Gtk.ApplicationWindow):
                         or self._new_session()
                 if not self._ai_prepped:
                     self._ai_prepped = True
-                    GLib.idle_add(self._prep_ai_bubble)
-                sysmsg = (collect_system_context()
-                          if self.cfg.get("system_context", True)
-                          else None)
+                    post(self._prep_ai_bubble)
+                sysmsg = "\n\n".join(filter(None, [
+                    collect_system_context()
+                    if self.cfg.get("system_context", True) else "",
+                    CARD_PROMPT if self.cfg.get("cards", True) else "",
+                ])) or None
                 payload_text = (_content_with_image(text, image)
                                 if image else text)
                 handle = _StreamHandle(self.cfg["api_base"], self.key,
                                         self.session_id, payload_text, sysmsg)
             except urllib.error.HTTPError as e:
-                GLib.idle_add(self._finish,
-                              f"⚠ HTTP {e.code}: {e.read().decode()[:150]}")
+                body = e.read().decode("utf-8", "replace")[:150]
+                if e.code == 404 and "session" not in recovered:
+                    # session deleted in the app/CLI: start a new one —
+                    # nothing reached the agent, so resending is safe
+                    recovered.add("session")
+                    self.session_id = None
+                    self._save_session("")
+                    post(self._set_busy, True,
+                         "Session is gone — starting a new one…")
+                    continue
+                if e.code == 401 and "key" not in recovered:
+                    # API key rotated while we stayed resident: re-read it
+                    recovered.add("key")
+                    new_key = load_api_key(load_config())
+                    if new_key and new_key != self.key:
+                        self.key = new_key
+                        continue
+                if e.code == 401:
+                    post(self._finish,
+                         "⚠ Invalid API key (HTTP 401) — check API_SERVER_KEY "
+                         "in ~/.hermes/.env or api_key in "
+                         "~/.config/hermes-spotlight/config.json")
+                    return
+                post(self._finish, f"⚠ HTTP {e.code}: {body}")
                 return
             except Exception as e:
                 # nothing reached the agent yet — safe to retry
                 if i < attempts:
-                    GLib.idle_add(self._set_busy, True,
-                                  f"Gateway waking up… ({i}/{attempts-1})")
+                    post(self._set_busy, True,
+                         f"Gateway waking up… ({i}/{attempts-1})")
                     time.sleep(5)
                     continue
-                GLib.idle_add(self._finish,
-                              f"⚠ Gateway unreachable: {e}\n"
-                              f"Is it running? "
-                              f"`systemctl --user status hermes-gateway`")
+                post(self._finish,
+                     f"⚠ Gateway unreachable: {e}\n"
+                     f"Is it running? "
+                     f"`systemctl --user status hermes-gateway`")
                 return
             # The request is accepted and the agent is running: never resend
             # from here on, a retry would run the prompt (and its tool
             # calls) a second time.
             self._stream = handle
+            if gen != self._gen:        # stopped while connecting
+                handle.stop()
+                return
             try:
                 for ev, payload in handle.events():
-                    self._on_event(ev, payload)
+                    if gen != self._gen:
+                        handle.stop()
+                        return
+                    self._on_event(ev, payload, post)
                 return
             except urllib.error.HTTPError as e:
-                GLib.idle_add(self._finish,
-                              f"⚠ HTTP {e.code}: {e.read().decode()[:150]}")
+                post(self._finish,
+                     f"⚠ HTTP {e.code}: {e.read().decode()[:150]}")
                 return
             except _StoppedError:
                 return
             except Exception as e:
-                GLib.idle_add(self._finish_interrupted,
-                              f"⚠ Stream lost: {e}")
+                post(self._finish_interrupted, f"⚠ Stream lost: {e}")
                 return
 
     def _finish_interrupted(self, note):
-        """Stream broke mid-answer: keep what already streamed in, append
-        the note — the answer may continue in the Hermes app session."""
+        """Stream broke or was stopped mid-answer: keep what already
+        streamed in, append the note — the answer may continue in the
+        Hermes app session."""
         self._append_delta(self._drain_deltas())
-        lbl = getattr(self, "_stream_lbl", None)
-        partial = lbl.get_text() if lbl is not None else ""
+        partial = self._stream_text
         return self._finish(f"{partial}\n\n{note}" if partial else note)
 
-    def _on_event(self, ev, p):
+    def _on_event(self, ev, p, post):
         if ev == "assistant.delta":
             self._queue_delta(p.get("delta", ""))
         elif ev == "tool.started":
             name = p.get("tool_name") or "?"
             prev = (p.get("preview") or "")[:70]
-            GLib.idle_add(self._set_tool_status, f"⚙ {name}: {prev}")
+            post(self._set_tool_status, f"⚙ {name}: {prev}")
         elif ev == "tool.completed":
-            GLib.idle_add(self._set_tool_status, "")
+            post(self._set_tool_status, "")
         elif ev == "assistant.completed":
-            GLib.idle_add(self._finish, p.get("content", ""))
+            post(self._finish, p.get("content", ""))
         elif ev == "error":
-            GLib.idle_add(self._finish, f"⚠ {p.get('message', 'error')}")
+            post(self._finish, f"⚠ {p.get('message', 'error')}")
 
     def _set_tool_status(self, text):
         if self._closed:
             return False
-        lbl = getattr(self, "_status", None)
-        if lbl is not None:
-            lbl.set_text(text)
+        if self._status is not None:
+            self._status.set_text(text)
         return False
 
     def _queue_delta(self, delta):
@@ -1431,11 +2241,9 @@ class Spotlight(Gtk.ApplicationWindow):
     def _append_delta(self, delta):
         if self._closed or not delta:
             return False
-        lbl = getattr(self, "_stream_lbl", None)
-        if lbl is not None:
-            lbl.set_text(lbl.get_text() + delta)
+        self._stream_text += delta
+        self._render_stream()
         self._grow()
-        self._scroll_down()
         return False
 
     def _finish(self, content):
@@ -1445,15 +2253,16 @@ class Spotlight(Gtk.ApplicationWindow):
         self._append_delta(self._drain_deltas())   # deltas still buffered
         # interrupted streams can complete with empty content — keep the
         # partial text that already streamed in
-        if not content and getattr(self, "_stream_lbl", None) is not None:
-            content = self._stream_lbl.get_text() or "⚠ empty response"
+        if not content:
+            content = self._stream_text or "⚠ empty response"
         # errors can arrive before any bubble was prepped — create one now
-        if getattr(self, "_ai_bubble", None) is None:
+        if self._ai_bubble is None:
             self._prep_ai_bubble()
         self._render_ai_final(content)
         self._set_busy(False)
         self._grow()
-        self._scroll_down()
+        if not self.get_visible() and self.cfg.get("notify", True):
+            self._notify(content)
         self.entry.grab_focus()
         return False
 
@@ -1473,6 +2282,10 @@ class App(Gtk.Application):
         key = load_api_key(cfg)
         win = Spotlight(self, cfg, key)
         self._win = win
+        # target of the "answer finished" notification
+        show = Gio.SimpleAction.new("show", None)
+        show.connect("activate", lambda *_: win.reopen())
+        self.add_action(show)
         if cfg.get("resident", True):
             self.hold()           # hidden window: keep the process alive
         if not key:

@@ -41,7 +41,7 @@ def steps(win):
         win._finish("short **answer**\n```python\nprint('hi')\n```")
         h2=win.get_size_request()[1]
         ok(h2 < h1, f"height shrinks for short final answer: {h2}")
-        ov=[w for w in win._ai_bubble if isinstance(w, Gtk.Overlay)]
+        ov=[w for w in win._live_box if isinstance(w, Gtk.Overlay)]
         ok(len(ov)==1, "code block rendered with overlay")
         btn=[c for c in ov[0] if isinstance(c, Gtk.Button)][0]
         btn.emit("clicked")
