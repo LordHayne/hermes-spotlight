@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     "app_desktop_id": "hermes",         # gtk-launch <id> for the full app
     "history_file": os.path.expanduser("~/.cache/hermes-spotlight-history"),
     "session_file": os.path.expanduser("~/.cache/hermes-spotlight/session"),
+    "system_context": True,             # send OS/hardware context with asks
 }
 
 THEMES = {
@@ -135,6 +136,119 @@ THEMES = {
 }
 
 PLACEHOLDER = "Ask Hermes…   (↑ history, /new, /stop)"
+
+
+# --------------------------------------------------------------------------
+# System context (sent as ephemeral system_message so the agent knows the
+# machine it is talking about; appended, never replacing, the core prompt)
+# --------------------------------------------------------------------------
+def collect_system_context(max_apps: int = 5) -> str:
+    """One compact snapshot of the machine: OS, DE, kernel, GPU, RAM,
+    running apps. Cached 60s — the widget is opened many times, the
+    values change slowly. All local reads, no subprocess spam."""
+    cache = os.path.expanduser("~/.cache/hermes-spotlight/syscontext.txt")
+    try:
+        if time.time() - os.path.getmtime(cache) < 60:
+            return open(cache).read()
+    except OSError:
+        pass
+    ctx = {}
+    # OS + kernel (single file reads, no subprocess)
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    ctx["os"] = line.split("=", 1)[1].strip().strip('"')
+                    break
+    except OSError:
+        pass
+    ctx["kernel"] = os.uname().release
+    ctx["desktop"] = os.environ.get("XDG_CURRENT_DESKTOP", "?")
+    ctx["display"] = ("wayland" if os.environ.get("WAYLAND_DISPLAY")
+                      else "x11")
+    # RAM: first MemTotal line of /proc/meminfo
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    ctx["ram_gb"] = round(int(line.split()[1]) / 1.048576e6)
+                    break
+    except OSError:
+        pass
+    # GPU + CPU model: one lspci/cpuinfo read via subprocess (fast, cached)
+    try:
+        r = subprocess.run(["lspci"], capture_output=True, text=True,
+                           timeout=5)
+        gpus = [l.split(":", 2)[2].strip()
+                for l in r.stdout.splitlines()
+                if " VGA " in l or " 3D " in l]
+        if gpus:
+            ctx["gpu"] = "; ".join(gpus)
+    except Exception:
+        pass
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    ctx["cpu"] = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    # running GUI apps (from our own app index — cheap)
+    ctx["running_apps"] = _running_apps(max_apps)
+    lines = [f"Machine context of the user asking via hermes-spotlight:"]
+    for k in ("os", "kernel", "desktop", "display", "cpu", "gpu", "ram_gb"):
+        if k in ctx:
+            lines.append(f"- {k}: {ctx[k]}")
+    if ctx.get("running_apps"):
+        lines.append(f"- currently running apps: "
+                     f"{', '.join(ctx['running_apps'])}")
+    out = "\n".join(lines)
+    try:
+        with open(cache, "w") as f:
+            f.write(out)
+    except OSError:
+        pass
+    return out
+
+
+def _running_apps(max_apps: int) -> list:
+    """Names of running GUI apps, derived from /proc cmdlines matched
+    against the desktop index. Local and heuristic; best effort."""
+    out = []
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmd = f.read().split(b"\x00")[0].decode(
+                        "utf-8", "replace")
+            except OSError:
+                continue
+            if not cmd:
+                continue
+            base = os.path.basename(cmd)
+            if base in _KNOWN_APP_PROCESSES:
+                name = _KNOWN_APP_PROCESSES[base]
+                if name not in out:
+                    out.append(name)
+            if len(out) >= max_apps:
+                break
+    except OSError:
+        pass
+    return out
+
+
+# A small mapping: process names -> human-readable app names. Keep tiny;
+# this is a hint for the agent, not an exhaustive process list.
+_KNOWN_APP_PROCESSES = {
+    "steam": "Steam", "gamescope": "Gamescope", "oncehuman": "Once Human",
+    "firefox": "Firefox", "chromium": "Chromium", "chrome": "Chrome",
+    "discord": "Discord", "spotify": "Spotify", "code": "VS Code",
+    "obsidian": "Obsidian", "gimp": "GIMP", "kdenlive": "Kdenlive",
+    "vlc": "VLC", "mpv": "mpv", "obs": "OBS Studio",
+}
 
 
 # --------------------------------------------------------------------------
@@ -468,10 +582,13 @@ class _StoppedError(Exception):
 
 
 class _StreamHandle:
-    def __init__(self, base, key, sid, text):
+    def __init__(self, base, key, sid, text, system_message=None):
+        payload = {"message": text}
+        if system_message:
+            payload["system_message"] = system_message
         req = urllib.request.Request(
             f"{base}/api/sessions/{sid}/chat/stream",
-            data=json.dumps({"message": text}).encode(),
+            data=json.dumps(payload).encode(),
             headers={"Authorization": f"Bearer {key}",
                      "Content-Type": "application/json"},
             method="POST")
@@ -540,7 +657,9 @@ class Spotlight(Gtk.ApplicationWindow):
         self.entry = Gtk.Entry(placeholder_text=PLACEHOLDER)
         self.entry.set_icon_from_icon_name(
             Gtk.EntryIconPosition.PRIMARY, "system-search-symbolic")
-        self.entry.connect("activate", self._on_send)
+        # lambda: "activate" passes the entry as first arg, which would
+        # otherwise land in force_ask and disable launching apps via Enter
+        self.entry.connect("activate", lambda *_: self._on_send())
         ek = Gtk.EventControllerKey()
         ek.connect("key-pressed", self._on_entry_key)
         self.entry.add_controller(ek)
@@ -975,9 +1094,32 @@ class Spotlight(Gtk.ApplicationWindow):
                 if not self._ai_prepped:
                     self._ai_prepped = True
                     GLib.idle_add(self._prep_ai_bubble)
+                sysmsg = (collect_system_context()
+                          if self.cfg.get("system_context", True)
+                          else None)
                 handle = _StreamHandle(self.cfg["api_base"], self.key,
-                                        self.session_id, text)
-                self._stream = handle
+                                        self.session_id, text, sysmsg)
+            except urllib.error.HTTPError as e:
+                GLib.idle_add(self._finish,
+                              f"⚠ HTTP {e.code}: {e.read().decode()[:150]}")
+                return
+            except Exception as e:
+                # nothing reached the agent yet — safe to retry
+                if i < attempts:
+                    GLib.idle_add(self._set_busy, True,
+                                  f"Gateway waking up… ({i}/{attempts-1})")
+                    time.sleep(5)
+                    continue
+                GLib.idle_add(self._finish,
+                              f"⚠ Gateway unreachable: {e}\n"
+                              f"Is it running? "
+                              f"`systemctl --user status hermes-gateway`")
+                return
+            # The request is accepted and the agent is running: never resend
+            # from here on, a retry would run the prompt (and its tool
+            # calls) a second time.
+            self._stream = handle
+            try:
                 for ev, payload in handle.events():
                     self._on_event(ev, payload)
                 return
@@ -988,16 +1130,16 @@ class Spotlight(Gtk.ApplicationWindow):
             except _StoppedError:
                 return
             except Exception as e:
-                if i < attempts:
-                    GLib.idle_add(self._set_busy, True,
-                                  f"Gateway waking up… ({i}/{attempts-1})")
-                    time.sleep(5)
-                else:
-                    GLib.idle_add(self._finish,
-                                  f"⚠ Gateway unreachable: {e}\n"
-                                  f"Is it running? "
-                                  f"`systemctl --user status hermes-gateway`")
-                    return
+                GLib.idle_add(self._finish_interrupted,
+                              f"⚠ Stream lost: {e}")
+                return
+
+    def _finish_interrupted(self, note):
+        """Stream broke mid-answer: keep what already streamed in, append
+        the note — the answer may continue in the Hermes app session."""
+        lbl = getattr(self, "_stream_lbl", None)
+        partial = lbl.get_text() if lbl is not None else ""
+        return self._finish(f"{partial}\n\n{note}" if partial else note)
 
     def _on_event(self, ev, p):
         if ev == "assistant.delta":
