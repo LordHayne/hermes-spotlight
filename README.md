@@ -15,6 +15,7 @@ Raycast-style AI launchers are great — but Mac-only and closed-source. On Linu
 - 🌤️ **Native cards** — weather, appointments and package tracking come as cards — and Hermes builds its own cards from a blueprint whenever a table, comparison or stats read better than prose
 - 📊 **`/status`** — instant local system card: CPU load/temp, parked cores, RAM, GPU, VRAM, running games — live, no agent round trip
 - 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready
+- 🛡️ **Approvals** — when Hermes wants to run a dangerous command, a card shows the command and why; allow once, for the session, always, or deny (needs a current hermes-agent; a notification asks if the bar is hidden)
 
 **Context**
 - ❝ **Highlighted text** — select text anywhere, press `Alt+Space`, ask "explain this"; it shows up as a removable chip

@@ -767,6 +767,8 @@ label link:hover {{ text-decoration: underline; }}
            border: 1px solid {t['entry_border']}; border-radius: 8px;
            padding: 4px 12px; box-shadow: none; font-size: 12px; }}
 .cardbtn:hover {{ background: {t['accent_bg_hover']}; }}
+.cardbtn.deny {{ color: {t['syntax']['number']}; }}
+.approval {{ border-color: {t['syntax']['number']}; }}
 .statustitle {{ color: {t['accent']}; font-weight: bold; font-size: 12px;
                margin-bottom: 6px; }}
 .statuskey {{ color: {t['placeholder']}; font-size: 12px; }}
@@ -2771,12 +2773,96 @@ class Spotlight(Gtk.ApplicationWindow):
             name = p.get("tool_name") or "?"
             prev = (p.get("preview") or "")[:70]
             post(self._set_tool_status, f"⚙ {name}: {prev}")
-        elif ev == "tool.completed":
+        elif ev in ("tool.completed", "tool.failed"):
             post(self._set_tool_status, "")
+        elif ev == "approval.request":
+            # newer gateways pause a dangerous command until the client
+            # answers (POST /v1/runs/{run_id}/approval, 5 min timeout)
+            post(self._show_approval, p)
         elif ev == "assistant.completed":
             post(self._finish, p.get("content", ""))
         elif ev == "error":
             post(self._finish, f"⚠ {p.get('message', 'error')}")
+
+    # ------------------------------------------------------- approvals
+    APPROVAL_LABELS = {"once": "Allow once", "session": "Allow for session",
+                       "always": "Always allow", "deny": "Deny"}
+    APPROVAL_DONE = {"once": "✓ allowed once", "session": "✓ allowed for this session",
+                     "always": "✓ always allowed", "deny": "✗ denied"}
+
+    def _show_approval(self, p):
+        """Card for a command the agent wants to run: what and why, plus
+        one button per choice the gateway offers."""
+        if self._ai_bubble is None:
+            self._prep_ai_bubble()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.add_css_class("card")
+        card.add_css_class("approval")
+        head = Gtk.Box(spacing=10)
+        head.append(_lbl("⚠️", "cardicon2", valign=Gtk.Align.CENTER))
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        titles.append(_lbl("Hermes wants to run a command", "cardtitle",
+                           xalign=0))
+        if p.get("description"):
+            titles.append(_lbl(_s(p["description"], 300), "cardsub", xalign=0,
+                               wrap=True))
+        head.append(titles)
+        card.append(head)
+        if p.get("command"):
+            cmd = _lbl(_s(p["command"], 1000), "codeblock", xalign=0,
+                       wrap=True, selectable=True,
+                       wrap_mode=Pango.WrapMode.WORD_CHAR)
+            card.append(cmd)
+        row = Gtk.Box(spacing=6)
+        choices = [c for c in (p.get("choices") or ["once", "deny"])
+                   if c in self.APPROVAL_LABELS]
+        result = _lbl("", "pkgstatus", xalign=0, visible=False)
+        for c in choices:
+            btn = Gtk.Button(label=self.APPROVAL_LABELS[c])
+            btn.add_css_class("cardbtn")
+            if c == "deny":
+                btn.add_css_class("deny")
+            btn.connect("clicked", lambda _b, c=c: self._answer_approval(
+                p, c, row, result))
+            row.append(btn)
+        card.append(row)
+        card.append(result)
+        # stays when the answer is re-rendered (lives beside the text box)
+        self._ai_bubble.insert_child_after(card, self._status)
+        self._grow()
+        self._scroll_down(force=True)
+        if not self.get_visible() and self.cfg.get("notify", True):
+            n = Gio.Notification.new("Hermes needs your approval")
+            n.set_body(_s(p.get("command") or p.get("description"), 180))
+            n.set_default_action("app.show")
+            self.get_application().send_notification("approval", n)
+        return False
+
+    def _answer_approval(self, p, choice, row, result):
+        row.set_sensitive(False)
+        body = {"choice": choice}
+        if p.get("request_id"):
+            body["request_id"] = p["request_id"]
+
+        def work():
+            try:
+                _post(self.cfg["api_base"], self.key,
+                      f"/v1/runs/{p.get('run_id', '')}/approval", body, timeout=15)
+                text, ok = self.APPROVAL_DONE[choice], True
+            except urllib.error.HTTPError as e:
+                text, ok = f"⚠ HTTP {e.code}: {e.read().decode()[:120]}", False
+            except Exception as e:
+                text, ok = f"⚠ {e}", False
+            GLib.idle_add(done, text, ok)
+
+        def done(text, ok):
+            row.set_visible(not ok)
+            row.set_sensitive(True)
+            result.set_text(text)
+            result.set_visible(True)
+            self._grow()
+            return False
+        threading.Thread(target=work, daemon=True).start()
 
     def _set_tool_status(self, text):
         if self._closed:

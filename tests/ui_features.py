@@ -22,6 +22,7 @@ sessions = set()
 chats = []                  # (sid, message) of accepted chat requests
 sysmsgs = []                # system_message of each accepted chat request
 disconnects = []
+approvals = {}              # run_id -> {"event": threading.Event, "body": …}
 
 class Fake(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -47,6 +48,13 @@ class Fake(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if not self._authed(): return
+        if self.path.startswith("/v1/runs/") and self.path.endswith("/approval"):
+            run_id = self.path.split("/")[3]
+            pend = approvals.get(run_id)
+            if not pend or pend["event"].is_set():
+                return self._json(409, {"error": {"code": "approval_not_pending"}})
+            pend["body"] = body; pend["event"].set()
+            return self._json(200, {"status": "ok"})
         if self.path == "/api/sessions":
             sid = f"s{len(sessions) + 1}"; sessions.add(sid)
             return self._json(200, {"session": {"id": sid}})
@@ -62,6 +70,18 @@ class Fake(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode())
             self.wfile.flush()
         try:
+            if "APPROVE" in json.dumps(msg):
+                run_id = f"run_{len(chats)}"
+                pend = approvals[run_id] = {"event": threading.Event(), "body": None}
+                ev("tool.started", {"tool_name": "terminal", "preview": "rm -rf ~/.cache/x"})
+                ev("approval.request", {"event": "approval.request", "run_id": run_id,
+                   "request_id": "req1", "command": "rm -rf ~/.cache/x",
+                   "description": "delete the shader cache",
+                   "choices": ["once", "session", "always", "deny"]})
+                pend["event"].wait(10)
+                ev("tool.failed" if pend["body"]["choice"] == "deny" else "tool.completed", {})
+                ev("assistant.completed", {"content": "done: " + pend["body"]["choice"]})
+                return
             if "SLOW" in json.dumps(msg):
                 for i in range(200):           # until the client hangs up
                     ev("assistant.delta", {"delta": f"tok{i} "})
@@ -441,6 +461,32 @@ def steps(win, app):
        "missing or non-image files stay as text")
     ws = m._md_widgets(f"see ![inline]({img}) here", win.theme)
     ok(len(ws) == 1 and isinstance(ws[0], Gtk.Label), "images inside a sentence are left alone")
+
+    # 16 approval card (newer gateways pause dangerous commands)
+    win._new_conversation()
+    send(win, "APPROVE clean the cache")
+    yield from until(lambda: win._ai_bubble is not None and
+                     any(c.has_css_class("approval") for c in win._ai_bubble), 5)
+    card = next((c for c in win._ai_bubble if c.has_css_class("approval")), None)
+    t = bubble_text(card) if card else ""
+    ok(card is not None and "rm -rf ~/.cache/x" in t and "delete the shader cache" in t,
+       "approval card shows command and reason")
+    btns.clear(); walkb(card)
+    ok([b.get_label() for b in btns] == ["Allow once", "Allow for session", "Always allow", "Deny"],
+       "one button per offered choice")
+    ok(win._busy, "answer waits while the approval is pending")
+    btns[0].emit("clicked")
+    yield from until(lambda: not win._busy, 5)
+    run = next(iter(approvals.values()))
+    ok(run["body"] == {"choice": "once", "request_id": "req1"},
+       "click posts the choice + request_id to /v1/runs/{id}/approval")
+    t = bubble_text(win._ai_bubble)
+    ok("✓ allowed once" in t and "done: once" in t, "card shows the result, answer continues")
+    # a second click on a resolved approval reports the conflict instead of hanging
+    win._answer_approval({"run_id": "run_x", "request_id": "r"}, "once",
+                         Gtk.Box(), lbl2 := Gtk.Label())
+    yield from until(lambda: lbl2.get_text() != "", 3)
+    ok("409" in lbl2.get_text(), "stale approval answer shows the gateway's error")
 
     app.release(); win._closed = True; app.quit()
 
