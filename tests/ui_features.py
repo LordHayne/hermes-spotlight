@@ -23,6 +23,7 @@ chats = []                  # (sid, message) of accepted chat requests
 sysmsgs = []                # system_message of each accepted chat request
 disconnects = []
 approvals = {}              # run_id -> {"event": threading.Event, "body": …}
+steers = {}                 # run_id -> {"accept": bool, "text": str|None, "event": Event}
 
 class Fake(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -48,6 +49,12 @@ class Fake(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if not self._authed(): return
+        if self.path.startswith("/v1/runs/") and self.path.endswith("/steer"):
+            st = steers.get(self.path.split("/")[3])
+            if not st or not st["accept"]:
+                return self._json(409, {"error": {"code": "run_not_accepting_steer"}})
+            st["text"] = body.get("input"); st["event"].set()
+            return self._json(200, {"object": "hermes.run.steer", "accepted": True})
         if self.path.startswith("/v1/runs/") and self.path.endswith("/approval"):
             run_id = self.path.split("/")[3]
             pend = approvals.get(run_id)
@@ -70,6 +77,19 @@ class Fake(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode())
             self.wfile.flush()
         try:
+            if "STEER" in json.dumps(msg):
+                run_id = f"run_s{len(chats)}"
+                st = steers[run_id] = {"accept": "409" not in json.dumps(msg),
+                                       "text": None, "event": threading.Event()}
+                for i in range(40):                  # ~2 s of streaming
+                    ev("assistant.delta", {"delta": f"w{i} ", "run_id": run_id})
+                    time.sleep(0.05)
+                    if st["event"].is_set(): break
+                done = {"content": "first answer", "run_id": run_id}
+                if st["text"]:
+                    done["pending_steer"] = st["text"]   # arrived after the last step
+                ev("assistant.completed", done)
+                return
             if "APPROVE" in json.dumps(msg):
                 run_id = f"run_{len(chats)}"
                 pend = approvals[run_id] = {"event": threading.Event(), "body": None}
@@ -497,6 +517,38 @@ def steps(win, app):
     yield from until(lambda: lbl2.get_text() != "", 3)
     ok("409" in lbl2.get_text(), "stale approval answer shows the gateway's error")
 
+    # 17 steering a running answer
+    win._new_conversation(); n = len(chats)
+    send(win, "STEER please write a lot")
+    yield from until(lambda: win._run_id is not None and "w2" in win._stream_text, 5)
+    win.entry.set_text("actually make it short"); win.entry.emit("activate")
+    steer_box = win.flow.get_last_child()
+    ok(steer_box.has_css_class("msg-steer") and "↪ actually make it short" in bubble_text(steer_box),
+       "typing while busy shows a steer note instead of being ignored")
+    yield from until(lambda: any(v["text"] for v in steers.values()), 3)
+    ok(any(v["text"] == "actually make it short" for v in steers.values()),
+       "steer text posted to /v1/runs/{run_id}/steer")
+    yield from until(lambda: len(chats) >= n + 2 and not win._busy, 8)
+    ok(len(chats) >= n + 2 and chats[n + 1][1] == "actually make it short",
+       "late steer (pending_steer) is sent as the next question")
+    win._new_conversation(); n = len(chats)
+    send(win, "STEER 409 long answer")
+    yield from until(lambda: win._run_id is not None and "w2" in win._stream_text, 5)
+    win.entry.set_text("and in English"); win.entry.emit("activate")
+    yield from until(lambda: "right after" in bubble_text(win.flow.get_last_child()), 3)
+    ok("will ask this right after the current answer" in bubble_text(win.flow.get_last_child()),
+       "rejected steer is queued")
+    yield from until(lambda: len(chats) >= n + 2 and not win._busy, 8)
+    ok(len(chats) >= n + 2 and chats[n + 1][1] == "and in English",
+       "queued question is asked after the answer")
+    send(win, "STEER 409 again")
+    yield from until(lambda: win._busy and win._run_id is not None, 5)
+    win.entry.set_text("queued then stopped"); win.entry.emit("activate")
+    yield 300
+    win.entry.set_text("/stop"); win.entry.emit("activate"); n = len(chats)
+    yield 1200
+    ok(len(chats) == n and not win._followups, "/stop also drops queued questions")
+
     app.release(); win._closed = True; app.quit()
 
 def run(gen):
@@ -519,7 +571,7 @@ class TApp(m.App):
             GLib.timeout_add(300, run, steps(self._win, self))
 
 app = TApp()
-GLib.timeout_add_seconds(60, app.quit)
+GLib.timeout_add_seconds(90, app.quit)
 app.run(None)
 srv.shutdown()
 print(f"== {sum(res)}/{len(res)} passed")

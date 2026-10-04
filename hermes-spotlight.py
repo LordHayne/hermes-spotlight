@@ -182,7 +182,7 @@ THEMES = {
 }
 
 PLACEHOLDER = "Ask Hermes…   (↑ history, /new, /stop, /status)"
-BUSY_HINT = "Hermes is thinking…   (/stop or Ctrl+C to stop)"
+BUSY_HINT = "Hermes is working…   type to steer · /stop or Ctrl+C to stop"
 SEL_MAX = 8000                  # chars of highlighted text sent as context
 
 
@@ -759,6 +759,10 @@ label link:hover {{ text-decoration: underline; }}
            font-size: 11px; min-width: 90px; }}
 .cardvalue {{ color: {t['text']}; font-weight: bold; font-size: 18px; }}
 .mdimage {{ border-radius: 10px; margin: 6px 0; }}
+.msg-steer {{ margin: 2px 0 4px 40px; padding: 6px 12px; border-radius: 10px;
+             border: 1px dashed {t['entry_border']}; }}
+.steer {{ color: {t['text']}; font-size: 13px; }}
+.steerhint {{ color: {t['placeholder']}; font-size: 11px; }}
 .tablecell {{ color: {t['text']}; font-size: 13px; }}
 .tablekey {{ color: {t['placeholder']}; font-size: 13px; }}
 .statvalue {{ color: {t['text']}; font-weight: bold; font-size: 15px; }}
@@ -1795,6 +1799,8 @@ class Spotlight(Gtk.ApplicationWindow):
         self._stick_bottom = True
         self._scrolling_programmatic = False
         self._status_card = None    # live /status bubble while refreshing
+        self._run_id = None         # gateway run of the current answer
+        self._followups = []        # questions to send once it finishes
         self._status_widgets = {}
         # streamed deltas are batched (~30 fps) instead of one UI update
         # per token
@@ -2607,6 +2613,10 @@ class Spotlight(Gtk.ApplicationWindow):
             self._new_conversation()
             return
         image, sel = self._pending_image, self._pending_sel
+        if self._busy and text:
+            self.entry.set_text("")
+            self._steer(text)
+            return
         if self._busy or not (text or image or sel):
             return
         if low in ("/status", "/system"):
@@ -2646,6 +2656,7 @@ class Spotlight(Gtk.ApplicationWindow):
         # per-send state: fresh AI bubble, fresh stream buffer, stale
         # widget refs cleared (old bubbles may be removed already)
         self._gen += 1
+        self._run_id = None
         self._status_card = None        # freeze a live /status card
         self._drain_deltas()            # late deltas of a stopped answer
         self._ai_bubble = None
@@ -2667,6 +2678,7 @@ class Spotlight(Gtk.ApplicationWindow):
     def _new_conversation(self):
         self._stop_stream(note=None)
         self._gen += 1
+        self._followups.clear()
         self._status_card = None
         self.session_id = None
         # clear widget refs — the flow children are removed below, stale
@@ -2695,6 +2707,7 @@ class Spotlight(Gtk.ApplicationWindow):
         if not self._busy:
             return
         self._gen += 1                  # silence the worker's callbacks
+        self._followups.clear()         # a stop also cancels queued steers
         handle, self._stream = self._stream, None
         if handle is not None:
             handle.stop()
@@ -2783,6 +2796,8 @@ class Spotlight(Gtk.ApplicationWindow):
                     if gen != self._gen:
                         handle.stop()
                         return
+                    if payload.get("run_id"):
+                        self._run_id = payload["run_id"]
                     self._on_event(ev, payload, post)
                 return
             except urllib.error.HTTPError as e:
@@ -2817,9 +2832,66 @@ class Spotlight(Gtk.ApplicationWindow):
             # answers (POST /v1/runs/{run_id}/approval, 5 min timeout)
             post(self._show_approval, p)
         elif ev == "assistant.completed":
+            if p.get("pending_steer"):
+                # steer text that arrived after the agent's last step:
+                # the gateway hands it back to be sent as the next turn
+                post(self._queue_followup, str(p["pending_steer"]))
             post(self._finish, p.get("content", ""))
         elif ev == "error":
             post(self._finish, f"⚠ {p.get('message', 'error')}")
+
+    # ---------------------------------------------------------- steering
+    def _steer(self, text: str):
+        """Typed while an answer runs: steer the live run (delivered at the
+        agent's next step). If the gateway can't take it, ask it next."""
+        note = Gtk.Label(label=f"↪ {text}", xalign=0, wrap=True,
+                         selectable=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        note.add_css_class("steer")
+        hint = Gtk.Label(label="steering…", xalign=0)
+        hint.add_css_class("steerhint")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.add_css_class("msg-steer")
+        box.append(note)
+        box.append(hint)
+        self.flow.append(box)
+        self._grow()
+        self._scroll_down(force=True)
+        run_id, gen = self._run_id, self._gen
+
+        def work():
+            ok, why = False, "no live run yet"
+            if run_id:
+                try:
+                    r = _post(self.cfg["api_base"], self.key,
+                              f"/v1/runs/{run_id}/steer", {"input": text},
+                              timeout=10)
+                    ok = bool(r.get("accepted"))
+                except urllib.error.HTTPError as e:
+                    why = f"HTTP {e.code}"
+                except Exception as e:
+                    why = str(e)
+            GLib.idle_add(done, ok, why)
+
+        def done(ok, why):
+            if ok:
+                hint.set_text("steered — Hermes picks it up at its next step")
+            elif gen == self._gen and self._busy:
+                hint.set_text("will ask this right after the current answer")
+                self._queue_followup(text)
+            else:
+                hint.set_text(f"⚠ not delivered ({why})")
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def _queue_followup(self, text: str):
+        if text and text not in self._followups:
+            self._followups.append(text)
+        return False
+
+    def _send_followup(self):
+        if self._followups and not self._busy and not self._closed:
+            self._ask(self._followups.pop(0))
+        return False
 
     # ------------------------------------------------------- approvals
     APPROVAL_LABELS = {"once": "Allow once", "session": "Allow for session",
@@ -2953,6 +3025,8 @@ class Spotlight(Gtk.ApplicationWindow):
         if not self.get_visible() and self.cfg.get("notify", True):
             self._notify(content)
         self.entry.grab_focus()
+        if self._followups:
+            GLib.timeout_add(400, self._send_followup)
         return False
 
 

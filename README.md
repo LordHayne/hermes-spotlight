@@ -14,6 +14,7 @@ Raycast-style AI launchers are great — but Mac-only and closed-source. On Linu
 - 🔄 **Live answers** — text streams in and is rendered as Markdown while it arrives: code blocks with a copy button, lists, clickable links, and images the agent produces (a browser screenshot of a chart shows up inline; click for full size); tool calls show as `⚙ terminal: …`
 - 🌤️ **Native cards** — weather, appointments and package tracking come as cards — and Hermes builds its own cards from a blueprint whenever a table, comparison or stats read better than prose
 - 📊 **`/status`** — instant local system card: CPU load/temp, parked cores, RAM, GPU, VRAM, running games — live, no agent round trip
+- ↪️ **Steer a running answer** — keep typing while Hermes works and press Enter: the agent picks it up at its next step; if it's too late, it's asked right after
 - 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready
 - 🛡️ **Approvals** — when Hermes wants to run a dangerous command, a card shows the command and why; allow once, for the session, always, or deny (needs a current hermes-agent; a notification asks if the bar is hidden)
 
@@ -99,7 +100,7 @@ suggests what you asked before.
 | Key / command | What it does |
 |---|---|
 | `Alt+Space` | open the bar (again: focus it) |
-| `Enter` | launch the selected app, or ask Hermes |
+| `Enter` | launch the selected app, or ask Hermes — while an answer runs: steer it |
 | `Shift+Enter` | always ask Hermes, even when an app matches |
 | `Tab` / `→` | accept the ghost-text suggestion |
 | `↑` / `↓` | app suggestions, or your question history |

@@ -166,7 +166,7 @@ if command -v gtk4-broadwayd >/dev/null; then
     rm -f "$UI_ERR"
 
     UI_ERR="$(mktemp)"
-    UI_OUT="$(GDK_BACKEND=broadway BROADWAY_DISPLAY="$BW" timeout 60 \
+    UI_OUT="$(GDK_BACKEND=broadway BROADWAY_DISPLAY="$BW" timeout 90 \
         /usr/bin/python3 "$HERE/tests/ui_features.py" "$W" 2>"$UI_ERR")"
     UI_RC=$?
     echo "$UI_OUT" | grep -E "^(PASS|FAIL)" | sed 's/^/  /'
