@@ -403,6 +403,26 @@ def steps(win, app):
     ok(len(chats) > n and chats[-1][1] == "details on the RTX 4070",
        "follow-up button sends its question")
 
+    # 14 duplicate lists next to a card are hidden
+    lst = {"type": "blocks", "title": "Top", "blocks": [{"kind": "list", "items": [
+        {"title": "Counter-Strike 2"}, {"title": "Dota 2"}, {"title": "Valheim"}]}]}
+    blk = "```card\n" + json.dumps(lst) + "\n```"
+    ans = ("Top 3:\n\n1. **Counter-Strike 2** — 1.2M\n2. **Dota 2** — 800k\n3. **Valheim** — 220k\n\n"
+           + blk + "\n\nCS2 leads by far.")
+    d = m.dedupe_card_lists(ans)
+    ok("1. **Counter" not in d and "Top 3:" in d and "CS2 leads" in d and blk in d,
+       "list repeated in the card is dropped, prose and card stay")
+    other = "Tips:\n\n- drink water\n- sleep\n\n" + blk
+    ok(m.dedupe_card_lists(other) == other, "a list that is not in the card stays")
+    plain = "1. **Counter-Strike 2**\n2. **Dota 2**"
+    ok(m.dedupe_card_lists(plain) == plain, "no card -> nothing removed")
+    win._new_conversation(); win._prep_ai_bubble()
+    win._append_delta(ans[:60])          # list already streamed in
+    win._finish(ans)
+    t = bubble_text(win._ai_bubble)
+    ok("1.2M" not in t and "Counter-Strike 2" in t and "CS2 leads" in t,
+       "final render hides the streamed duplicate list")
+
     app.release(); win._closed = True; app.quit()
 
 def run(gen):

@@ -1042,6 +1042,48 @@ def with_card_reminder(question: str) -> str:
 _CARD_RE = re.compile(r"```card[ \t]*\n?.*?```[ \t]*\n?", re.S)
 
 
+_LIST_ITEM = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+(.*)$")
+
+
+def _strings(v) -> list:
+    """All string values in a parsed card, recursively."""
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, dict):
+        return [s for x in v.values() for s in _strings(x)]
+    if isinstance(v, list):
+        return [s for x in v for s in _strings(x)]
+    return []
+
+
+def dedupe_card_lists(text: str) -> str:
+    """Drop text lists the answer's cards already show. Models often list
+    the data and then repeat it in the card; a list goes only when it has
+    2+ items and >= 80 % of them (their label before a dash/colon) appear
+    in a card. Prose is never touched."""
+    card_text = []
+    for m in re.finditer(r"```card[ \t]*\n?(.*?)```", text, re.S):
+        try:
+            card_text += _strings(json.loads(m.group(1)))
+        except ValueError:
+            pass
+    hay = " ".join(card_text).lower()
+    if not hay:
+        return text
+    out = []
+    for para in re.split(r"(\n\s*\n)", text):
+        lines = [ln for ln in para.split("\n") if ln.strip()]
+        items = [_LIST_ITEM.match(ln) for ln in lines]
+        if len(lines) >= 2 and all(items):
+            labels = [re.split(r"\s+[—–-]\s+|:\s", it.group(1).replace("**", ""))[0]
+                      .strip().lower() for it in items]
+            hits = sum(1 for lb in labels if len(lb) >= 2 and lb in hay)
+            if hits >= 0.8 * len(labels):
+                continue
+        out.append(para)
+    return re.sub(r"\n{3,}", "\n\n", "".join(out)).strip()
+
+
 def strip_cards(text: str) -> str:
     """Answer text without card blocks (copy, notifications)."""
     return _CARD_RE.sub("", text).strip()
@@ -2348,6 +2390,7 @@ class Spotlight(Gtk.ApplicationWindow):
         if b is None:
             return
         full = text
+        text = dedupe_card_lists(text)
         b.remove(self._status)
         b.remove(self._stream_lbl)
         # keep the paragraphs already rendered while streaming when the

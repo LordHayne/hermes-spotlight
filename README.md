@@ -74,7 +74,8 @@ stats. Nobody has to write a renderer per topic.
 The blueprint lives in the system message the spotlight sends; Hermes
 decides when a card is worth it (at most one per answer). Everything is
 rendered as plain text widgets with size limits, unknown blocks are
-skipped and links must be https.
+skipped and links must be https. If the text repeats a list the card already shows,
+the spotlight hides the duplicate (copying the answer keeps it).
 
 `/status` is a card too, but fully local: it never asks the agent, so it
 is there in a fraction of a second and refreshes itself while you look.
