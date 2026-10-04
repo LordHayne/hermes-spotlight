@@ -79,6 +79,12 @@ THEMES = {
         "code_bg":    "#16161e",
         "code_fg":    "#c0caf5",
         "inline_code_fg": "#9ece6a",
+        "window_bg_top": "rgba(25, 26, 38, 0.78)",
+        "window_bg_bottom": "rgba(18, 18, 26, 0.88)",
+        "edge": "rgba(122, 162, 247, 0.20)",
+        "syntax": {"keyword": "#bb9af7", "string": "#9ece6a",
+                   "comment": "#565f89", "number": "#ff9e64",
+                   "func": "#7aa2f7", "decor": "#2ac3de"},
     },
     "midnight": {
         "window_bg":  "rgba(12, 12, 18, 0.75)",
@@ -96,6 +102,12 @@ THEMES = {
         "code_bg":    "#101018",
         "code_fg":    "#d0d8f0",
         "inline_code_fg": "#c3e88d",
+        "window_bg_top": "rgba(18, 18, 28, 0.80)",
+        "window_bg_bottom": "rgba(10, 10, 16, 0.90)",
+        "edge": "rgba(130, 170, 255, 0.22)",
+        "syntax": {"keyword": "#c792ea", "string": "#c3e88d",
+                   "comment": "#58608a", "number": "#f78c6c",
+                   "func": "#82aaff", "decor": "#89ddff"},
     },
     "rose-pine": {
         "window_bg":  "rgba(26, 23, 36, 0.75)",
@@ -113,6 +125,12 @@ THEMES = {
         "code_bg":    "#1f1d2e",
         "code_fg":    "#e0def4",
         "inline_code_fg": "#9ccfd8",
+        "window_bg_top": "rgba(33, 29, 45, 0.78)",
+        "window_bg_bottom": "rgba(24, 21, 34, 0.88)",
+        "edge": "rgba(235, 188, 186, 0.20)",
+        "syntax": {"keyword": "#c4a7e7", "string": "#9ccfd8",
+                   "comment": "#6e6a86", "number": "#f6c177",
+                   "func": "#ebbcba", "decor": "#ea9a97"},
     },
 }
 
@@ -275,8 +293,12 @@ def load_api_key(cfg: dict) -> str:
 def build_css(cfg: dict) -> bytes:
     t = THEMES.get(cfg.get("theme", "tokyo-night"), THEMES["tokyo-night"])
     return f"""
-window {{ background: {t['window_bg']}; }}
-.spot {{ padding: 10px 10px 8px 10px; }}
+window {{
+  background:
+    linear-gradient(to bottom, {t['window_bg_top']}, {t['window_bg_bottom']});
+  border-radius: 16px;
+}}
+.spot {{ padding: 12px 12px 10px 12px; }}
 entry {{
   background: {t['entry_bg']};
   border-radius: 14px;
@@ -290,6 +312,7 @@ entry {{
 entry:focus {{ border-color: {t['entry_border_focus']}; }}
 entry image {{ color: {t['accent']}; }}
 entry placeholder {{ color: {t['placeholder']}; }}
+selection {{ background-color: rgba(122, 162, 247, 0.35); }}
 .logobtn {{
   background: {t['accent_bg']};
   border: 1px solid {t['entry_border']};
@@ -298,19 +321,19 @@ entry placeholder {{ color: {t['placeholder']}; }}
 }}
 .logobtn:hover {{ background: {t['accent_bg_hover']}; }}
 spinner {{ padding: 1px; }}
-.msg-user, .msg-ai {{ padding: 8px 12px; border-radius: 10px; margin: 3px 0; }}
+.msg-user, .msg-ai {{ padding: 10px 14px; border-radius: 12px; margin: 4px 0; }}
 .msg-user {{ background: {t['user_bubble']}; color: {t['text']}; }}
 .msg-ai   {{ background: {t['ai_bubble']}; color: {t['ai_text']}; }}
 .msg-user text, .msg-ai text {{ color: inherit; }}
-.toolstatus {{ color: {t['accent']}; font-size: 11px; padding: 2px 12px; }}
+.toolstatus {{ color: {t['accent']}; font-size: 11px; padding: 3px 14px; }}
 .sugg {{ padding: 6px 12px; border-radius: 8px; margin: 1px 2px; }}
 .sugglabel {{ color: {t['text']}; font-size: 14px; }}
 .sugghint {{ color: {t['placeholder']}; font-size: 11px; }}
 .suggsel {{ background: {t['accent_bg_hover']}; }}
 .codeblock {{
   background: {t['code_bg']}; color: {t['code_fg']};
-  padding: 8px 10px; margin: 4px 0;
-  border-radius: 8px;
+  padding: 10px 12px; margin: 6px 0;
+  border-radius: 10px;
   font-family: monospace; font-size: 13px;
 }}
 """.encode()
@@ -334,6 +357,55 @@ def _get(base, key, path, timeout=10):
                                  headers={"Authorization": f"Bearer {key}"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
+
+
+# --------------------------------------------------------------------------
+# Syntax highlighting (regex-based, Pango markup)
+# --------------------------------------------------------------------------
+SYNTAX_KEYWORDS = (
+    r"\b(?:def|class|return|if|elif|else|for|while|try|except|finally|"
+    r"with|as|import|from|in|not|and|or|is|None|True|False|lambda|yield|"
+    r"pass|break|continue|raise|global|nonlocal|assert|del|async|await|"
+    r"func|fn|let|var|const|struct|enum|impl|trait|pub|mut|match|self|"
+    r"void|int|float|str|bool|list|dict|set|new|delete|switch|case|"
+    r"public|private|static|echo|fi|then|do|done|esac|function|local)\b"
+)
+
+
+def _highlight_code(code: str, syn: dict) -> str:
+    """Regex-based syntax highlighting to Pango markup. Order matters:
+    strings/comments are stashed as private-use-unicode placeholders first
+    (immune to every later regex), then keywords/numbers run on the rest."""
+    # quote=False: raw quotes stay, so string regexes see them; Pango is
+    # fine with raw quotes in text content. (& < > are still escaped.)
+    text = html.escape(code, quote=False)
+    tokens = []
+
+    def _stash(m):
+        tokens.append(m.group(0))
+        return chr(0xE000 + len(tokens) - 1)     # private-use char
+
+    text = re.sub(r'"""[^"]*"""|"[^"\n]*"|\'[^\'\n]*\'', _stash, text)
+    text = re.sub(r"#[^\n]*", _stash, text)
+    text = re.sub(r"@[A-Za-z_][\w.]*", _stash, text)          # decorators
+    text = re.sub(SYNTAX_KEYWORDS,
+                  rf'<span foreground="{syn["keyword"]}">\g<0></span>', text)
+    text = re.sub(r"\b([a-z_][\w]*)\s*\(",
+                  rf'<span foreground="{syn["func"]}">\1</span>(', text)
+    text = re.sub(r"\b\d[\d_]*(?:\.\d+)?j?\b",
+                  rf'<span foreground="{syn["number"]}">\g<0></span>', text)
+
+    def _restore(m):
+        tok = tokens[ord(m.group(0)) - 0xE000]
+        if tok[0] in "\"'":
+            color = syn["string"]
+        elif tok.startswith("#"):
+            color = syn["comment"]
+        else:
+            color = syn["decor"]
+        return f'<span foreground="{color}">{tok}</span>'
+
+    return re.sub(r"[\ue000-\uf8ff]", _restore, text)
 
 
 # --------------------------------------------------------------------------
@@ -367,10 +439,15 @@ def _md_widgets(text: str, theme: dict) -> list:
         if not part.strip():
             continue
         if i % 2 == 1:
-            lbl = Gtk.Label(label=part.rstrip("\n"), wrap=True, xalign=0,
+            lbl = Gtk.Label(label="", wrap=True, xalign=0,
                             wrap_mode=Pango.WrapMode.WORD_CHAR,
                             selectable=True)
             lbl.add_css_class("codeblock")
+            try:
+                lbl.set_markup(_highlight_code(part.rstrip("\n"),
+                                                theme["syntax"]))
+            except Exception:
+                lbl.set_text(part.rstrip("\n"))
         else:
             lbl = Gtk.Label(label="", wrap=True, xalign=0, selectable=True,
                             wrap_mode=Pango.WrapMode.WORD_CHAR)
