@@ -19,6 +19,21 @@ Raycast-style AI launchers are great — but Mac-only and closed-source. On Linu
 - ⌨️ **Quality of life** — input history (↑/↓), `/new`, `/stop`
 - 🪟 **Logo button** — jump straight to the full Hermes desktop app
 
+## The Vision — the assistant every OS is missing
+
+Every desktop OS ships an "AI assistant" that is either a thin chat wrapper (Siri), a cloud bolt-on nobody asked for (Windows Copilot), or nothing at all (most Linux desktops). What's missing everywhere is the same thing: **an assistant that is part of the OS experience — local, aware of the machine, and actually able to do things.**
+
+hermes-spotlight is an attempt at that missing layer for Linux:
+
+- **One keystroke, always there.** Not an app you open — an overlay your desktop grows, like Spotlight on macOS. You don't "use" it, you just ask.
+- **The agent, not a wrapper.** Behind the bar is a real agent with tools (terminal, files, browser), persistent memory and skills. It doesn't just answer — it executes. Ask it "why is my game stuttering" and it diagnoses your GPU driver state, because it *knows* your OS, GPU, RAM and running apps (system context is sent with every question).
+- **100% local, by architecture.** Not "we respect your privacy" — there is simply no cloud path. The widget talks only to `127.0.0.1`. Your machine context, your conversations, your keys.
+- **Native, not Electron.** ~200 lines of GTK4, stdlib-only client, no bundled Chromium. It should feel like the desktop grew it.
+
+**Where this goes:** quick answers → app launching → system diagnosis → eventually the place where you handle everything that isn't a full app: "clean my shader cache", "why did that crash", "set up the new drive". The bar stays slim; the agent grows.
+
+The North Star: *the user should never think "I need to open a terminal for this" — asking should always be the shortest path.*
+
 ## Requirements
 
 - Linux with a desktop session (COSMIC, GNOME, KDE, anything — Wayland or X11)
