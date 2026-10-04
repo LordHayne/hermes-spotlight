@@ -11,7 +11,7 @@ Press `Alt+Space`, ask anything — your [hermes-agent](https://github.com/NousR
 Raycast-style AI launchers are great — but Mac-only and closed-source. On Linux there was nothing that turns a **tool-using AI agent** into a one-keystroke overlay. hermes-spotlight does exactly that: it talks to your Hermes gateway on `127.0.0.1`, so it has the **same agent, memory, skills and tools** as your CLI and desktop app sessions. Ask in the spotlight, continue in the app — the conversation is shared.
 
 **Ask**
-- 🔄 **Live answers** — text streams in and is rendered as Markdown while it arrives: code blocks with a copy button, lists, clickable links; tool calls show as `⚙ terminal: …`
+- 🔄 **Live answers** — text streams in and is rendered as Markdown while it arrives: code blocks with a copy button, lists, clickable links, and images the agent produces (a browser screenshot of a chart shows up inline; click for full size); tool calls show as `⚙ terminal: …`
 - 🌤️ **Native cards** — weather, appointments and package tracking come as cards — and Hermes builds its own cards from a blueprint whenever a table, comparison or stats read better than prose
 - 📊 **`/status`** — instant local system card: CPU load/temp, parked cores, RAM, GPU, VRAM, running games — live, no agent round trip
 - 🔔 **Background answers** — close the bar while Hermes works; a notification tells you when the answer is ready

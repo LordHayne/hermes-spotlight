@@ -69,6 +69,7 @@ import shlex
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 import uuid
@@ -756,6 +757,7 @@ label link:hover {{ text-decoration: underline; }}
 .pkgtime {{ color: {t['placeholder']}; font-family: monospace;
            font-size: 11px; min-width: 90px; }}
 .cardvalue {{ color: {t['text']}; font-weight: bold; font-size: 18px; }}
+.mdimage {{ border-radius: 10px; margin: 6px 0; }}
 .tablecell {{ color: {t['text']}; font-size: 13px; }}
 .tablekey {{ color: {t['placeholder']}; font-size: 13px; }}
 .statvalue {{ color: {t['text']}; font-weight: bold; font-size: 15px; }}
@@ -1467,6 +1469,67 @@ def _card_widget(src: str, theme: dict = None):
         return None
 
 
+# Images on their own line: Hermes' "MEDIA:/path" attachment convention or
+# Markdown "![alt](src)". Local files are shown inline; web images are not
+# fetched (the widget only talks to the local gateway) but linked.
+_IMAGE_LINE = re.compile(
+    r"^[ \t]*(?:MEDIA:[ \t]*(\S+)|!\[([^\]]*)\]\(([^)\s]+)\))[ \t]*$", re.M)
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+IMAGE_MAX_BYTES = 20 * 2**20
+IMAGE_MAX_HEIGHT = 360
+
+
+def _local_image_path(src: str) -> str | None:
+    if src.startswith("file://"):
+        src = urllib.parse.unquote(src[7:])
+    src = os.path.expanduser(src)
+    if (os.path.isabs(src) and src.lower().endswith(IMAGE_EXTS)
+            and os.path.isfile(src)
+            and os.path.getsize(src) <= IMAGE_MAX_BYTES):
+        return src
+    return None
+
+
+def _open_path(path: str):
+    try:
+        Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(),
+                                           None)
+    except Exception:
+        pass
+
+
+def _image_widget(src: str, alt: str, theme: dict):
+    """Inline picture for a local image (click opens it full size), a
+    link for a web image, None if it can't be shown."""
+    path = _local_image_path(src)
+    if path:
+        try:
+            tex = Gdk.Texture.new_from_filename(path)
+        except Exception:
+            return None
+        w, h = tex.get_width(), tex.get_height()
+        pic = Gtk.Picture.new_for_paintable(tex)
+        pic.set_can_shrink(True)
+        pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+        pic.set_halign(Gtk.Align.START)
+        # fit the bubble width (~640 px), never taller than the cap
+        disp_h = min(IMAGE_MAX_HEIGHT, int(640 * h / max(1, w)))
+        pic.set_size_request(int(disp_h * w / max(1, h)), disp_h)
+        pic.add_css_class("mdimage")
+        pic.set_tooltip_text(alt or os.path.basename(path))
+        pic.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        click = Gtk.GestureClick()
+        click.connect("released", lambda *_: _open_path(path))
+        pic.add_controller(click)
+        return pic
+    if re.match(r"https?://", src):
+        lbl = Gtk.Label(xalign=0)
+        lbl.set_markup(f'<a href="{html.escape(src)}">🖼 '
+                       f'{html.escape(alt or "image")}</a>')
+        return lbl
+    return None
+
+
 def _md_widgets(text: str, theme: dict) -> list:
     widgets = []
     # split -> [text, lang, code, text, lang, code, …, text]
@@ -1499,17 +1562,38 @@ def _md_widgets(text: str, theme: dict) -> list:
             widgets.append(ov)
             continue
         else:
-            lbl = Gtk.Label(label="", wrap=True, xalign=0, selectable=True,
-                            wrap_mode=Pango.WrapMode.WORD_CHAR)
-            # blank lines around a code block/card would render as gaps
-            part = part.strip("\n")
-            try:
-                lbl.set_markup(_md_inline(part, theme["inline_code_fg"],
-                                          theme["code_bg"], theme["accent"]))
-            except Exception:
-                lbl.set_text(part)
-        widgets.append(lbl)
+            widgets += _text_widgets(part, theme)
     return widgets
+
+
+def _text_label(part: str, theme: dict):
+    lbl = Gtk.Label(label="", wrap=True, xalign=0, selectable=True,
+                    wrap_mode=Pango.WrapMode.WORD_CHAR)
+    # blank lines around a code block/card would render as gaps
+    part = part.strip("\n")
+    try:
+        lbl.set_markup(_md_inline(part, theme["inline_code_fg"],
+                                  theme["code_bg"], theme["accent"]))
+    except Exception:
+        lbl.set_text(part)
+    return lbl
+
+
+def _text_widgets(part: str, theme: dict) -> list:
+    """Plain text with image lines turned into pictures/links."""
+    out, pos = [], 0
+    for m in _IMAGE_LINE.finditer(part):
+        src = m.group(1) or m.group(3)
+        img = _image_widget(src, m.group(2) or "", theme)
+        if img is None:
+            continue                        # left in the text as written
+        if part[pos:m.start()].strip():
+            out.append(_text_label(part[pos:m.start()], theme))
+        out.append(img)
+        pos = m.end()
+    if part[pos:].strip():
+        out.append(_text_label(part[pos:], theme))
+    return out
 
 
 # --------------------------------------------------------------------------

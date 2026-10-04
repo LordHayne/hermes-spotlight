@@ -423,6 +423,25 @@ def steps(win, app):
     ok("1.2M" not in t and "Counter-Strike 2" in t and "CS2 leads" in t,
        "final render hides the streamed duplicate list")
 
+    # 15 images: MEDIA:/path and ![alt](src)
+    img = os.path.join(tmp, "chart.png")
+    pbi = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 1280, 720)
+    pbi.fill(0x3d59a1ff); pbi.savev(img, "png", [], [])
+    ws = m._md_widgets(f"Here is the chart:\n\nMEDIA:{img}\n\nWhat it shows.", win.theme)
+    ok([type(w).__name__ for w in ws] == ["Label", "Picture", "Label"],
+       "MEDIA:/path line renders as an inline picture")
+    ok(ws[1].get_size_request()[1] <= m.IMAGE_MAX_HEIGHT and ws[1].get_size_request()[0] > 0,
+       f"picture scaled to fit (size {ws[1].get_size_request()})")
+    ws = m._md_widgets(f"![chart]({img})\n\n![remote](https://example.org/c.png)", win.theme)
+    ok(isinstance(ws[0], Gtk.Picture) and isinstance(ws[1], Gtk.Label)
+       and "🖼 remote" in ws[1].get_text() and "example.org" in ws[1].get_label(),
+       "local ![alt](path) inline, web image becomes a link (not fetched)")
+    ws = m._md_widgets("MEDIA:/nope/missing.png\n\n![x](/etc/passwd)", win.theme)
+    ok(all(isinstance(w, Gtk.Label) for w in ws) and "missing.png" in bubble_text(ws[0]),
+       "missing or non-image files stay as text")
+    ws = m._md_widgets(f"see ![inline]({img}) here", win.theme)
+    ok(len(ws) == 1 and isinstance(ws[0], Gtk.Label), "images inside a sentence are left alone")
+
     app.release(); win._closed = True; app.quit()
 
 def run(gen):
