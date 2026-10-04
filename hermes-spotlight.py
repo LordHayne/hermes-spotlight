@@ -60,6 +60,7 @@ if (__name__ == "__main__"
     sys.exit(0)
 
 import base64
+import hashlib
 import html
 import io
 import json
@@ -1500,13 +1501,49 @@ def _open_path(path: str):
         pass
 
 
+IMAGE_CACHE = os.path.expanduser("~/.cache/hermes-spotlight/images")
+
+
+def _data_url_image(src: str):
+    """data:image/…;base64,… (the gateway inlines MEDIA:/path attachments
+    this way) -> (texture, cached file path for opening) or None."""
+    m = re.match(r"data:image/([a-z0-9.+-]+);base64,(.+)$", src, re.S)
+    if not m or len(m.group(2)) > IMAGE_MAX_BYTES * 4 // 3 + 4:
+        return None
+    try:
+        raw = base64.b64decode(m.group(2))
+        tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(raw))
+        ext = {"jpeg": "jpg", "svg+xml": "svg"}.get(m.group(1), m.group(1))
+        os.makedirs(IMAGE_CACHE, exist_ok=True)
+        path = os.path.join(IMAGE_CACHE,
+                            f"{hashlib.sha1(raw).hexdigest()[:16]}.{ext}")
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(raw)
+        return tex, path
+    except Exception:
+        return None
+
+
+def shorten_data_urls(text: str) -> str:
+    """Replace inline base64 images by [image] (copy, notifications)."""
+    return re.sub(r"!\[([^\]]*)\]\(data:image/[^)]*\)",
+                  lambda m: f"[{m.group(1) or 'image'}]", text)
+
+
 def _image_widget(src: str, alt: str, theme: dict):
-    """Inline picture for a local image (click opens it full size), a
-    link for a web image, None if it can't be shown."""
+    """Inline picture for a local or inlined (data:) image — click opens
+    it full size —, a link for a web image, None if it can't be shown."""
     path = _local_image_path(src)
+    tex = None
+    if path is None and src.startswith("data:image/"):
+        got = _data_url_image(src)
+        if got is None:
+            return None
+        tex, path = got
     if path:
         try:
-            tex = Gdk.Texture.new_from_filename(path)
+            tex = tex or Gdk.Texture.new_from_filename(path)
         except Exception:
             return None
         w, h = tex.get_width(), tex.get_height()
@@ -2377,7 +2414,7 @@ class Spotlight(Gtk.ApplicationWindow):
         """Desktop notification for an answer that finished while the
         window was hidden; clicking it re-opens the spotlight."""
         body = " ".join(re.sub(r"[`*#>\[\]]", "",
-                               strip_cards(content)).split())
+                               shorten_data_urls(strip_cards(content))).split())
         n = Gio.Notification.new("Hermes answered")
         n.set_body(body[:180] + ("…" if len(body) > 180 else ""))
         n.set_default_action("app.show")
@@ -2497,7 +2534,7 @@ class Spotlight(Gtk.ApplicationWindow):
                          tooltip_text="Copy answer")
         btn.add_css_class("copybtn")
         btn.add_css_class("answercopy")
-        btn.connect("clicked", _copy_code, strip_cards(full))
+        btn.connect("clicked", _copy_code, shorten_data_urls(strip_cards(full)))
         b.append(btn)
 
     def _scroll_down(self, force=False):

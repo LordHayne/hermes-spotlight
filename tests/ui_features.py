@@ -459,6 +459,15 @@ def steps(win, app):
     ws = m._md_widgets("MEDIA:/nope/missing.png\n\n![x](/etc/passwd)", win.theme)
     ok(all(isinstance(w, Gtk.Label) for w in ws) and "missing.png" in bubble_text(ws[0]),
        "missing or non-image files stay as text")
+    import base64 as _b64
+    durl = "data:image/png;base64," + _b64.b64encode(open(img, "rb").read()).decode()
+    gw = m._md_widgets(f"Here:\n\n![image]({durl})\n\nDone.", win.theme)
+    ok([type(w).__name__ for w in gw] == ["Label", "Picture", "Label"],
+       "gateway-inlined data: image renders as a picture")
+    ok(m.shorten_data_urls(f"a ![image]({durl}) b") == "a [image] b",
+       "copy/notify text drops the base64 payload")
+    ok(m._md_widgets("![x](data:image/png;base64,!!notbase64!!)", win.theme) and True,
+       "broken data URL does not crash")
     ws = m._md_widgets(f"see ![inline]({img}) here", win.theme)
     ok(len(ws) == 1 and isinstance(ws[0], Gtk.Label), "images inside a sentence are left alone")
 
