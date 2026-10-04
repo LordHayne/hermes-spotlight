@@ -3,6 +3,7 @@
 set -euo pipefail
 ok()   { printf '\033[1;32m[OK]\033[0m %s\n' "$*"; }
 
+pkill -f "python[0-9.]* $HOME/.local/bin/hermes-spotlight\$" 2>/dev/null || true
 rm -f "$HOME/.local/bin/hermes-spotlight" && ok "Removed ~/.local/bin/hermes-spotlight"
 rm -f "$HOME/.local/share/applications/hermes-spotlight.desktop" && ok "Removed menu entry"
 

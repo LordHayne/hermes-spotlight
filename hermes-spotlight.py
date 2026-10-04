@@ -25,7 +25,43 @@ Config: ~/.config/hermes-spotlight/config.json (created/migrated on run)
 Launch: bind your compositor's "Spawn/run command" shortcut to
         hermes-spotlight (see README for GNOME/KDE/COSMIC examples)
 """
+import os
+import subprocess
+import sys
+
+# overridable so tests never grab the real instance's D-Bus name
+APP_ID = os.environ.get("HERMES_SPOTLIGHT_APP_ID", "com.hermes.spotlight")
+
+
+def _activate_running_instance() -> bool:
+    """Fast path: when a resident spotlight is already running, ask it over
+    D-Bus to show itself (~10 ms) instead of paying for a full GTK start-up
+    (~300 ms). Forwards the compositor's activation token so the window
+    may take focus on Wayland."""
+    token = (os.environ.get("XDG_ACTIVATION_TOKEN")
+             or os.environ.get("DESKTOP_STARTUP_ID") or "")
+    pdata = "{}"
+    if token and "'" not in token and "\\" not in token:
+        pdata = "{'activation-token': <'%s'>}" % token
+    try:
+        r = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", APP_ID,
+             "--object-path", "/" + APP_ID.replace(".", "/"),
+             "--method", "org.freedesktop.Application.Activate", pdata],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+if (__name__ == "__main__"
+        and not os.environ.get("HERMES_SPOTLIGHT_AUTOTEST")
+        and _activate_running_instance()):
+    sys.exit(0)
+
+import base64
 import html
+import io
 import json
 import os
 import re
@@ -39,7 +75,8 @@ import uuid
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, GLib, Gdk, Pango
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Pango
 
 # --------------------------------------------------------------------------
 # Config
@@ -61,6 +98,8 @@ DEFAULT_CONFIG = {
     "history_file": os.path.expanduser("~/.cache/hermes-spotlight-history"),
     "session_file": os.path.expanduser("~/.cache/hermes-spotlight/session"),
     "system_context": True,             # send OS/hardware context with asks
+    "resident": True,                   # hide instead of quit: instant reopen
+    "max_height": 600,                  # window grows with content up to this
 }
 
 THEMES = {
@@ -426,7 +465,7 @@ entry {{
 entry:focus {{ border-color: {t['entry_border_focus']}; }}
 entry image {{ color: {t['accent']}; }}
 entry placeholder {{ color: {t['placeholder']}; }}
-selection {{ background-color: rgba(122, 162, 247, 0.35); }}
+selection {{ background-color: {t['accent_bg_hover']}; }}
 .logobtn {{
   background: {t['accent_bg']};
   border: 1px solid {t['entry_border']};
@@ -440,13 +479,26 @@ spinner {{ padding: 1px; }}
 .msg-ai   {{ background: {t['ai_bubble']}; color: {t['ai_text']}; }}
 .msg-user text, .msg-ai text {{ color: inherit; }}
 .toolstatus {{ color: {t['accent']}; font-size: 11px; padding: 3px 14px; }}
+.imgchip {{
+  background: {t['ai_bubble']}; color: {t['ai_text']};
+  padding: 4px 10px; border-radius: 999px; margin-top: 4px;
+  font-size: 12px;
+}}
+.chipx {{ background: transparent; border: none; padding: 2px; }}
 .sugg {{ padding: 6px 12px; border-radius: 8px; margin: 1px 2px; }}
 .sugglabel {{ color: {t['text']}; font-size: 14px; }}
 .sugghint {{ color: {t['placeholder']}; font-size: 11px; }}
 .suggsel {{ background: {t['accent_bg_hover']}; }}
+.suggask .sugglabel {{ color: {t['accent']}; }}
+.copybtn {{
+  min-width: 0; min-height: 0; padding: 4px; margin: 10px 6px;
+  border-radius: 8px; border: none; box-shadow: none;
+  background: {t['accent_bg']}; color: {t['placeholder']};
+}}
+.copybtn:hover {{ background: {t['accent_bg_hover']}; color: {t['accent']}; }}
 .codeblock {{
   background: {t['code_bg']}; color: {t['code_fg']};
-  padding: 10px 12px; margin: 6px 0;
+  padding: 10px 40px 10px 12px; margin: 6px 0;
   border-radius: 10px;
   font-family: monospace; font-size: 13px;
 }}
@@ -546,6 +598,13 @@ def _md_inline(text: str, code_fg: str, code_bg: str, accent: str) -> str:
     return "\n".join(lines)
 
 
+def _copy_code(btn, code: str):
+    """Copy a code block to the clipboard, tick the button for a moment."""
+    btn.get_clipboard().set_content(Gdk.ContentProvider.new_for_value(code))
+    btn.set_icon_name("object-select-symbolic")
+    GLib.timeout_add(1200, lambda: btn.set_icon_name("edit-copy-symbolic"))
+
+
 def _md_widgets(text: str, theme: dict) -> list:
     widgets = []
     parts = re.split(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", text, flags=re.S)
@@ -557,11 +616,20 @@ def _md_widgets(text: str, theme: dict) -> list:
                             wrap_mode=Pango.WrapMode.WORD_CHAR,
                             selectable=True)
             lbl.add_css_class("codeblock")
+            code = part.rstrip("\n")
             try:
-                lbl.set_markup(_highlight_code(part.rstrip("\n"),
-                                                theme["syntax"]))
+                lbl.set_markup(_highlight_code(code, theme["syntax"]))
             except Exception:
-                lbl.set_text(part.rstrip("\n"))
+                lbl.set_text(code)
+            btn = Gtk.Button(icon_name="edit-copy-symbolic",
+                             halign=Gtk.Align.END, valign=Gtk.Align.START,
+                             tooltip_text="Copy")
+            btn.add_css_class("copybtn")
+            btn.connect("clicked", _copy_code, code)
+            ov = Gtk.Overlay(child=lbl)
+            ov.add_overlay(btn)
+            widgets.append(ov)
+            continue
         else:
             lbl = Gtk.Label(label="", wrap=True, xalign=0, selectable=True,
                             wrap_mode=Pango.WrapMode.WORD_CHAR)
@@ -572,6 +640,54 @@ def _md_widgets(text: str, theme: dict) -> list:
                 lbl.set_text(part)
         widgets.append(lbl)
     return widgets
+
+
+# --------------------------------------------------------------------------
+# Image paste (vision input)
+# --------------------------------------------------------------------------
+MAX_IMAGE_EDGE = 1568           # vision models cap ~1568-2048px; keep tokens low
+
+
+def _content_with_image(text: str, data_url: str) -> list:
+    """OpenAI vision content list: text part + image part."""
+    return [{"type": "text", "text": text or "What is on this screenshot?"},
+            {"type": "image_url",
+             "image_url": {"url": data_url, "detail": "low"}}]
+
+
+def _pixbuf_to_data_url(pb: GdkPixbuf.Pixbuf) -> str | None:
+    """Pixbuf -> downscaled jpeg data URL."""
+    try:
+        w, h = pb.get_width(), pb.get_height()
+        scale = min(1.0, MAX_IMAGE_EDGE / max(w, h))
+        if scale < 1.0:
+            pb = pb.scale_simple(max(1, round(w * scale)),
+                                 max(1, round(h * scale)),
+                                 GdkPixbuf.InterpType.BILINEAR)
+        ok, buf = pb.save_to_bufferv("jpeg", ["quality"], ["82"])
+        if not ok:
+            return None
+        return "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+    except Exception:
+        return None
+
+
+def _data_url_to_pixbuf(data_url: str, edge: int) -> GdkPixbuf.Pixbuf | None:
+    """Data URL -> small pixbuf for the thumbnail chip."""
+    try:
+        raw = base64.b64decode(data_url.split(",", 1)[1])
+        loader = GdkPixbuf.PixbufLoader()
+        loader.write(raw)
+        loader.close()
+        pb = loader.get_pixbuf()
+        if pb is None:
+            return None
+        w, h = pb.get_width(), pb.get_height()
+        scale = min(edge / max(w, h), 1.0)
+        return pb.scale_simple(int(w * scale), int(h * scale),
+                               GdkPixbuf.InterpType.BILINEAR)
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -646,7 +762,12 @@ class Spotlight(Gtk.ApplicationWindow):
         self._status = None
         self._stream_lbl = None
         self._ai_prepped = False
-        self._last_grow_len = 0
+        # streamed deltas are batched (~30 fps) instead of one UI update
+        # per token
+        self._delta_buf = []
+        self._delta_lock = threading.Lock()
+        self._flush_pending = False
+        self._icon_cache = {}
 
         w = int(cfg.get("width", 700))
         self.set_decorated(False)
@@ -665,6 +786,10 @@ class Spotlight(Gtk.ApplicationWindow):
         self.entry.add_controller(ek)
         # live app suggestions while typing
         self.entry.connect("changed", self._on_entry_changed)
+        # Ctrl+V image paste (screenshot tools put PNG into the clipboard)
+        self._clip = Gdk.Display.get_default().get_clipboard()
+        self._pending_image: str | None = None    # data URL
+        self._clip.connect("changed", self._on_clipboard_changed)
 
         self.spinner = Gtk.Spinner(halign=Gtk.Align.END,
                                    valign=Gtk.Align.CENTER,
@@ -691,6 +816,9 @@ class Spotlight(Gtk.ApplicationWindow):
                             margin_top=2)
         self.scroll = Gtk.ScrolledWindow(child=self.flow, vexpand=True)
         self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # report the real content height (capped) so _grow can measure it
+        self.scroll.set_propagate_natural_height(True)
+        self.scroll.set_max_content_height(int(cfg.get("max_height", 600)))
         self.scroll.set_visible(False)
 
         # --- app suggestions (launcher mode) --------------------------------
@@ -766,6 +894,88 @@ class Spotlight(Gtk.ApplicationWindow):
             return True
         return False
 
+    # ------------------------------------------------------ image paste
+    def _on_clipboard_changed(self, *_):
+        """Track clipboard so Ctrl+V knows an image is available."""
+        fmt = self._clip.get_formats()
+        self._clip_has_image = fmt.contain_gtype(GdkPixbuf.Pixbuf) \
+            if fmt else False
+
+    def _on_paste_key(self, ctrl, keyval, _kc, state):
+        """Ctrl+V: if the clipboard holds an image, attach it as vision
+        input instead of pasting text."""
+        if keyval in (Gdk.KEY_v, Gdk.KEY_V) and \
+                state & Gdk.ModifierType.CONTROL_MASK:
+            if getattr(self, "_clip_has_image", False):
+                self._attach_clipboard_image()
+                return True
+        return False
+
+    def _attach_clipboard_image(self):
+        def _done(clip, res):
+            try:
+                texture = clip.read_texture_finish(res)
+            except Exception:
+                return
+            if texture is None:
+                return
+            pb = Gdk.pixbuf_get_from_texture(texture) \
+                if hasattr(Gdk, "pixbuf_get_from_texture") else None
+            if pb is None:
+                # download_texture fallback
+                try:
+                    dl = texture.download()
+                    loader = GdkPixbuf.PixbufLoader()
+                    loader.write_bytes(dl.get_bytes())
+                    loader.close()
+                    pb = loader.get_pixbuf()
+                except Exception:
+                    return
+            data = _pixbuf_to_data_url(pb)
+            if data:
+                self._pending_image = data
+                GLib.idle_add(self._show_image_chip)
+        self._clip.read_texture_async(None, _done)
+
+    def _show_image_chip(self):
+        """Small thumbnail chip below the entry showing the attached image."""
+        if getattr(self, "img_chip", None) is not None:
+            self.img_chip.unparent()
+            self.img_chip = None
+        if self._pending_image is None:
+            return False
+        pb = _data_url_to_pixbuf(self._pending_image, 48)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                      margin_top=4)
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                       margin_top=4)
+        chip.add_css_class("imgchip")
+        if pb is not None:
+            chip.append(Gtk.Image.new_from_pixbuf(pb))
+        lbl = Gtk.Label(label="screenshot attached")
+        chip.append(lbl)
+        x = Gtk.Button(icon_name="window-close-symbolic")
+        x.add_css_class("chipx")
+        x.set_tooltip_text("Remove image")
+        x.connect("clicked", lambda *_: self._remove_image())
+        chip.append(x)
+        self.img_chip = chip
+        # insert directly after the overlay (before suggestions/answers)
+        self.get_child().get_first_child()  # .spot box
+        spot = self.get_child()
+        spot.insert_child_after(chip, spot.get_first_child())
+        self._grow(30)
+        return False
+
+    def _remove_image(self):
+        self._pending_image = None
+        chip = getattr(self, "img_chip", None)
+        if chip is not None:
+            chip.unparent()
+            self.img_chip = None
+            self._grow(-30)
+        self.entry.grab_focus()
+
     # ------------------------------------------------------ launcher mode
     def _on_entry_changed(self, *_):
         """Live app suggestions while typing (never for /commands)."""
@@ -787,49 +997,73 @@ class Spotlight(Gtk.ApplicationWindow):
         self._last_sugg = list(apps)
         if not apps:
             self.sugg_box.set_visible(False)
-            self.set_size_request(int(self.cfg.get("width", 700)), 72)
+            self._grow()
             return
         for app in apps:
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            row.add_css_class("sugg")
-            if app.get("icon"):
-                icon = self._app_icon(app["icon"])
-                if icon is not None:
-                    row.append(icon)
-            lbl = Gtk.Label(label=app["name"], xalign=0,
-                            ellipsize=Pango.EllipsizeMode.END, hexpand=True)
-            lbl.add_css_class("sugglabel")
-            row.append(lbl)
-            hint = Gtk.Label(label="⏎ start", xalign=1)
-            hint.add_css_class("sugghint")
-            row.append(hint)
-            click = Gtk.GestureClick()
-            click.connect("released", lambda *_a, a=app: self._launch_app(a))
-            row.add_controller(click)
-            self.sugg_box.append(row)
-            self.sugg_rows.append(row)
+            icon = self._app_icon(app["icon"]) if app.get("icon") else None
+            self._add_sugg_row(app["name"], "⏎ start", icon,
+                               lambda a=app: self._launch_app(a))
+        # last row: makes the alternative to launching visible
+        ask = self._add_sugg_row("✦ Ask Hermes", "⇧⏎", None,
+                                 lambda: self._on_send(force_ask=True))
+        ask.add_css_class("suggask")
+        # Enter launches the first match — show that it is selected
+        self._select_sugg(0)
         self.sugg_box.set_visible(True)
-        self.set_size_request(int(self.cfg.get("width", 700)),
-                              72 + 8 + len(apps) * 34)
+        self._grow()
+
+    def _add_sugg_row(self, label, hint, icon, on_click):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.add_css_class("sugg")
+        if icon is not None:
+            row.append(icon)
+        lbl = Gtk.Label(label=label, xalign=0,
+                        ellipsize=Pango.EllipsizeMode.END, hexpand=True)
+        lbl.add_css_class("sugglabel")
+        row.append(lbl)
+        h = Gtk.Label(label=hint, xalign=1)
+        h.add_css_class("sugghint")
+        row.append(h)
+        click = Gtk.GestureClick()
+        click.connect("released", lambda *_a: on_click())
+        row.add_controller(click)
+        self.sugg_box.append(row)
+        self.sugg_rows.append(row)
+        return row
+
+    def _select_sugg(self, idx):
+        self._app_sel = max(0, min(idx, len(self.sugg_rows) - 1))
+        for i, row in enumerate(self.sugg_rows):
+            if i == self._app_sel:
+                row.add_css_class("suggsel")
+            else:
+                row.remove_css_class("suggsel")
 
     def _app_icon(self, icon_name: str):
-        """Load an app icon: absolute path or icon-theme name, 20px."""
+        """App icon (absolute path or icon-theme name, 20px). Paintables
+        are cached — suggestions are rebuilt on every keystroke."""
+        if icon_name not in self._icon_cache:
+            self._icon_cache[icon_name] = self._load_icon_paintable(icon_name)
+        paintable = self._icon_cache[icon_name]
+        if paintable is None:
+            return None
+        img = Gtk.Image.new_from_paintable(paintable)
+        img.set_pixel_size(20)
+        return img
+
+    def _load_icon_paintable(self, icon_name: str):
         if icon_name.startswith("/"):
             if os.path.exists(icon_name):
                 try:
-                    tex = Gdk.Texture.new_from_filename(icon_name)
-                    img = Gtk.Image.new_from_paintable(tex)
-                    img.set_pixel_size(20)
-                    return img
+                    return Gdk.Texture.new_from_filename(icon_name)
                 except Exception:
                     return None
             return None
         try:
             theme = Gtk.IconTheme.get_for_display(self.get_display())
-            pb = theme.lookup_icon(icon_name, None, 20, 1, 1,
-                                   Gtk.TextDirection.NONE,
-                                   Gtk.IconLookupFlags.FORCE_REGULAR)
-            return Gtk.Image.new_from_paintable(pb)
+            return theme.lookup_icon(icon_name, None, 20, 1, 1,
+                                     Gtk.TextDirection.NONE,
+                                     Gtk.IconLookupFlags.FORCE_REGULAR)
         except Exception:
             return None
 
@@ -852,18 +1086,8 @@ class Spotlight(Gtk.ApplicationWindow):
             return True
         # Arrow keys: navigate app suggestions when visible, else history
         if keyval in (Gdk.KEY_Up, Gdk.KEY_Down) and self.sugg_rows:
-            if keyval == Gdk.KEY_Up:
-                self._app_sel = max(0, self._app_sel - 1)
-            else:
-                self._app_sel = len(self.sugg_rows) - 1 \
-                    if self._app_sel + 1 >= len(self.sugg_rows) \
-                    else self._app_sel + 1
-            for i, row in enumerate(self.sugg_rows):
-                row.set_has_tooltip(i == self._app_sel)  # cheap visual tick
-                if i == self._app_sel:
-                    row.add_css_class("suggsel")
-                else:
-                    row.remove_css_class("suggsel")
+            step = -1 if keyval == Gdk.KEY_Up else 1
+            self._select_sugg(self._app_sel + step)
             return True
         if keyval in (Gdk.KEY_Up, Gdk.KEY_Down) and self._hist:
             if keyval == Gdk.KEY_Up:
@@ -887,11 +1111,25 @@ class Spotlight(Gtk.ApplicationWindow):
             self.close()
 
     def _on_close(self, *_):
-        self._closed = True
         if self.session_id:
             self._save_session(self.session_id)
+        if self.cfg.get("resident", True) and not self._autotest_mode:
+            # stay alive hidden: the next shortcut press only re-shows the
+            # window (see _activate_running_instance). A running answer
+            # keeps streaming into the hidden window.
+            self.set_visible(False)
+            return True
+        self._closed = True
         self.get_application().quit()
         return True
+
+    def reopen(self):
+        """Show the resident window again, ready for the next question."""
+        self._t0 = time.time()
+        self._apps = build_app_index()        # cheap: cached, 15 min TTL
+        self.present()
+        self.entry.grab_focus()
+        self.entry.select_region(0, -1)
 
     def _open_app(self, *_):
         try:
@@ -982,14 +1220,15 @@ class Spotlight(Gtk.ApplicationWindow):
         adj = self.scroll.get_vadjustment()
         adj.set_value(adj.get_upper() - adj.get_page_size())
 
-    def _grow(self, extra=0):
-        total = extra
-        for child in list(self.flow):
-            for lbl in list(child):
-                t = lbl.get_text() or ""
-                total += len(t) // 62 + t.count("\n") + 1
-        self.set_size_request(int(self.cfg.get("width", 700)),
-                              min(600, 100 + total * 23))
+    def _grow(self, *_):
+        """Size the window to its content as GTK measures it (entry,
+        suggestions, conversation), capped at max_height. The scrolled
+        window propagates its natural height, capped by its own max."""
+        w = int(self.cfg.get("width", 700))
+        self.scroll.set_visible(self.flow.get_first_child() is not None)
+        h = self.get_child().measure(Gtk.Orientation.VERTICAL, w)[1]
+        self.set_size_request(w, min(int(self.cfg.get("max_height", 600)), h))
+        return False
 
     def _set_busy(self, on, hint=None):
         if self._closed:
@@ -1020,11 +1259,10 @@ class Spotlight(Gtk.ApplicationWindow):
             return
         # Launcher mode: Enter launches the selected/first app match.
         # Shift+Enter always asks Hermes instead.
+        # The last suggestion row is "Ask Hermes" — selecting it asks too.
         apps = self._last_sugg if (self.sugg_rows and not force_ask) else []
-        if apps:
-            sel = apps[self._app_sel] if 0 <= self._app_sel < len(apps) \
-                else apps[0]
-            self._launch_app(sel)
+        if apps and self._app_sel < len(apps):
+            self._launch_app(apps[max(0, self._app_sel)])
             return
         self._show_suggestions([])
         if not self.key:
@@ -1045,17 +1283,23 @@ class Spotlight(Gtk.ApplicationWindow):
         self._hist_idx = len(self._hist)
         self._save_history()
         self.entry.set_text("")
+        image = self._pending_image
+        self._pending_image = None
+        chip = getattr(self, "img_chip", None)
+        if chip is not None:
+            chip.unparent()
+            self.img_chip = None
         # per-send state: fresh AI bubble, fresh growth tracker,
         # stale widget refs cleared (old bubbles may be removed already)
         self._ai_bubble = None
         self._status = None
         self._stream_lbl = None
         self._ai_prepped = False
-        self._last_grow_len = 0
-        self._set_user_bubble(text)
+        self._set_user_bubble(text + ("  📷" if image else ""))
         self._grow()
         self._set_busy(True)
-        threading.Thread(target=self._worker, args=(text,), daemon=True).start()
+        threading.Thread(target=self._worker, args=(text, image),
+                         daemon=True).start()
 
     def _new_conversation(self):
         self._stop_stream()
@@ -1066,14 +1310,13 @@ class Spotlight(Gtk.ApplicationWindow):
         self._status = None
         self._stream_lbl = None
         self._ai_prepped = False
-        self._last_grow_len = 0
         self._save_session("")
         child = self.flow.get_first_child()
         while child is not None:
             nxt = child.get_next_sibling()
             self.flow.remove(child)
             child = nxt
-        self.set_size_request(int(self.cfg.get("width", 700)), 72)
+        self._grow()
         self._set_busy(False)
         self.entry.set_placeholder_text("New conversation — ask anything…")
 
@@ -1082,7 +1325,7 @@ class Spotlight(Gtk.ApplicationWindow):
             self._stream.stop()
             self._set_busy(False)
 
-    def _worker(self, text):
+    def _worker(self, text, image=None):
         attempts = 6
         for i in range(1, attempts + 1):
             if self._closed:
@@ -1097,8 +1340,10 @@ class Spotlight(Gtk.ApplicationWindow):
                 sysmsg = (collect_system_context()
                           if self.cfg.get("system_context", True)
                           else None)
+                payload_text = (_content_with_image(text, image)
+                                if image else text)
                 handle = _StreamHandle(self.cfg["api_base"], self.key,
-                                        self.session_id, text, sysmsg)
+                                        self.session_id, payload_text, sysmsg)
             except urllib.error.HTTPError as e:
                 GLib.idle_add(self._finish,
                               f"⚠ HTTP {e.code}: {e.read().decode()[:150]}")
@@ -1137,13 +1382,14 @@ class Spotlight(Gtk.ApplicationWindow):
     def _finish_interrupted(self, note):
         """Stream broke mid-answer: keep what already streamed in, append
         the note — the answer may continue in the Hermes app session."""
+        self._append_delta(self._drain_deltas())
         lbl = getattr(self, "_stream_lbl", None)
         partial = lbl.get_text() if lbl is not None else ""
         return self._finish(f"{partial}\n\n{note}" if partial else note)
 
     def _on_event(self, ev, p):
         if ev == "assistant.delta":
-            GLib.idle_add(self._append_delta, p.get("delta", ""))
+            self._queue_delta(p.get("delta", ""))
         elif ev == "tool.started":
             name = p.get("tool_name") or "?"
             prev = (p.get("preview") or "")[:70]
@@ -1163,19 +1409,32 @@ class Spotlight(Gtk.ApplicationWindow):
             lbl.set_text(text)
         return False
 
+    def _queue_delta(self, delta):
+        """Worker thread: buffer a delta, flush at most every 33 ms."""
+        with self._delta_lock:
+            self._delta_buf.append(delta)
+            if self._flush_pending:
+                return
+            self._flush_pending = True
+        GLib.timeout_add(33, self._flush_deltas)
+
+    def _drain_deltas(self) -> str:
+        with self._delta_lock:
+            chunk = "".join(self._delta_buf)
+            self._delta_buf.clear()
+            self._flush_pending = False
+        return chunk
+
+    def _flush_deltas(self):
+        return self._append_delta(self._drain_deltas())
+
     def _append_delta(self, delta):
-        if self._closed:
+        if self._closed or not delta:
             return False
         lbl = getattr(self, "_stream_lbl", None)
         if lbl is not None:
-            new = lbl.get_text() + delta
-            lbl.set_text(new)
-            # throttle: resize only when the wrapped line count changed
-            if len(new) // 62 != self._last_grow_len // 62:
-                self._last_grow_len = len(new)
-                self._grow()
-        else:
-            self._grow()
+            lbl.set_text(lbl.get_text() + delta)
+        self._grow()
         self._scroll_down()
         return False
 
@@ -1183,6 +1442,7 @@ class Spotlight(Gtk.ApplicationWindow):
         if self._closed:
             return False
         self._stream = None
+        self._append_delta(self._drain_deltas())   # deltas still buffered
         # interrupted streams can complete with empty content — keep the
         # partial text that already streamed in
         if not content and getattr(self, "_stream_lbl", None) is not None:
@@ -1200,22 +1460,26 @@ class Spotlight(Gtk.ApplicationWindow):
 
 class App(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="com.hermes.spotlight")
+        super().__init__(application_id=APP_ID)
 
     def do_activate(self):
         # Reuse the existing window: a second activation (e.g. pressing the
         # shortcut while the spotlight is open) must focus, not duplicate.
         win = getattr(self, "_win", None)
-        if win is None:
-            cfg = load_config()
-            key = load_api_key(cfg)
-            win = Spotlight(self, cfg, key)
-            self._win = win
-            if not key:
-                win._show_hint(
-                    "⚠ No API key — set api_key in "
-                    "~/.config/hermes-spotlight/config.json or "
-                    "API_SERVER_KEY in ~/.hermes/.env")
+        if win is not None:
+            win.reopen()
+            return
+        cfg = load_config()
+        key = load_api_key(cfg)
+        win = Spotlight(self, cfg, key)
+        self._win = win
+        if cfg.get("resident", True):
+            self.hold()           # hidden window: keep the process alive
+        if not key:
+            win._show_hint(
+                "⚠ No API key — set api_key in "
+                "~/.config/hermes-spotlight/config.json or "
+                "API_SERVER_KEY in ~/.hermes/.env")
         win.present()
         win.entry.grab_focus()
 

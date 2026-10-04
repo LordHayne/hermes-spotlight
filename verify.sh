@@ -143,6 +143,49 @@ for tname in m.THEMES:
 print("ok")
 PY
 
+# ------------------------------------------------- UI (headless Broadway)
+# Real GTK widgets on an invisible display; own app id, so a running
+# spotlight is never touched. Skipped when gtk4-broadwayd is missing.
+if command -v gtk4-broadwayd >/dev/null; then
+    BW=":$((40 + RANDOM % 50))"
+    # broadwayd names the socket after display + 1
+    BWSOCK="${XDG_RUNTIME_DIR:-/tmp}/broadway$(( ${BW#:} + 1 )).socket"
+    rm -f "$BWSOCK"            # stale socket from a killed run
+    gtk4-broadwayd "$BW" >/dev/null 2>&1 & BWPID=$!
+    for _ in $(seq 1 40); do   # wait for the display socket
+        [ -S "$BWSOCK" ] && break
+        sleep 0.05
+    done
+    UI_ERR="$(mktemp)"
+    UI_OUT="$(GDK_BACKEND=broadway BROADWAY_DISPLAY="$BW" timeout 30 \
+        /usr/bin/python3 "$HERE/tests/ui_headless.py" "$W" 2>"$UI_ERR")"
+    UI_RC=$?
+    echo "$UI_OUT" | grep -E "^(PASS|FAIL)" | sed 's/^/  /'
+    V $UI_RC "UI: launcher rows, sizing, batching, copy, resident"
+    [ $UI_RC -ne 0 ] && grep -iv warn "$UI_ERR" | tail -5
+    rm -f "$UI_ERR"
+
+    # fast path: a second launch hands over to the resident instance
+    export HERMES_SPOTLIGHT_APP_ID="test.spot.verify$$"
+    GDK_BACKEND=broadway BROADWAY_DISPLAY="$BW" /usr/bin/python3 "$W" >/dev/null 2>&1 & SPID=$!
+    OBJ="/$(echo "$HERMES_SPOTLIGHT_APP_ID" | tr . /)"
+    for _ in $(seq 1 60); do
+        gdbus introspect --session --dest "$HERMES_SPOTLIGHT_APP_ID" --object-path "$OBJ" >/dev/null 2>&1 && break
+        sleep 0.05
+    done
+    T0=$(date +%s%N)
+    GDK_BACKEND=broadway BROADWAY_DISPLAY="$BW" timeout 5 /usr/bin/python3 "$W" >/dev/null 2>&1
+    RC=$?; MS=$(( ($(date +%s%N) - T0) / 1000000 ))
+    kill -0 "$SPID" 2>/dev/null; ALIVE=$?
+    [ $RC -eq 0 ] && [ $ALIVE -eq 0 ] && [ $MS -lt 150 ]
+    V $? "resident fast path: re-open in ${MS} ms (< 150), instance kept"
+    kill "$SPID" "$BWPID" 2>/dev/null; wait "$SPID" "$BWPID" 2>/dev/null
+    rm -f "$BWSOCK"            # broadwayd leaves it behind on SIGTERM
+    unset HERMES_SPOTLIGHT_APP_ID
+else
+    echo "SKIP: UI tests (gtk4-broadwayd not installed)"
+fi
+
 # ---------------------------------------------------- full: round trip
 if [ $FULL -eq 1 ]; then
     SC="$HOME/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom.ron"

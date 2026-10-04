@@ -11,9 +11,10 @@ Press `Alt+Space`, ask anything — your local [hermes-agent](https://github.com
 Raycast-style AI launchers are great — but Mac-only and closed-source. On Linux there was nothing that turns a **local, tool-using AI agent** into a one-keystroke overlay. hermes-spotlight does exactly that: it talks to your local Hermes gateway API server, so it has the **same agent, memory, skills, and tools** as your CLI and desktop app sessions. Ask in the spotlight, continue in the app — the conversation is shared.
 
 - 🖥️ **100% local** — talks only to `127.0.0.1:8642`, no cloud, no telemetry
-- ⚡ **Fast** — starts as a single search bar, ~0.3s, no Electron
+- ⚡ **Instant** — stays resident after first use: re-opens in ~30 ms, no Electron
 - 🎨 **3 themes** — Tokyo Night, Midnight, Rose Pine (or add your own)
-- 📋 **Markdown answers** — code blocks, bold, lists, links; text is selectable
+- 📋 **Markdown answers** — code blocks with a copy button, bold, lists; text is selectable
+- 🚀 **App launcher** — type an app name, Enter starts it; the last row (or Shift+Enter) asks Hermes instead
 - 🔄 **Live streaming** — answer text streams in, tool calls show as `⚙ terminal: …`
 - 🧠 **Session memory** — the conversation survives closing, reboots
 - ⌨️ **Quality of life** — input history (↑/↓), `/new`, `/stop`
@@ -69,12 +70,18 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
   "api_base": "http://127.0.0.1:8642",
   "api_key": "",
   "theme": "tokyo-night",
-  "width": 700
+  "width": 700,
+  "max_height": 600,
+  "resident": true
 }
 ```
 
 - `api_key` empty → the key is read from `API_SERVER_KEY` in `~/.hermes/.env`
 - `theme`: `tokyo-night`, `midnight`, `rose-pine`
+- `max_height`: the window grows with the answer up to this height, then scrolls
+- `resident`: `true` keeps the process alive hidden after closing, so the next
+  shortcut press opens it instantly (~80 MB RAM). Config changes apply after
+  a restart: `pkill -f "bin/hermes-spotlight$"` (re-running `./install.sh` does this)
 - No config needed for the default setup — it just works.
 
 ## Bind another key

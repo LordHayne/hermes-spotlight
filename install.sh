@@ -67,6 +67,9 @@ fi
 say "Installing…"
 mkdir -p "$BINDIR" "$CFG_DIR" "$HOME/.cache"
 install -m 755 "$SPOT_DIR/hermes-spotlight.py" "$BINDIR/hermes-spotlight"
+# the spotlight stays resident after first use — restart it so the new
+# version (and config) is what the next shortcut press opens
+pkill -f "python[0-9.]* $BINDIR/hermes-spotlight\$" 2>/dev/null || true
 
 # Launcher .desktop (so it appears in app menus / can be bound)
 mkdir -p "$HOME/.local/share/applications"
