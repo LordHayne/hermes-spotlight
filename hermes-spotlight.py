@@ -924,6 +924,20 @@ WEATHER_ICONS = {"sun": "☀️", "clear": "☀️", "partly": "🌤️", "cloud
                  "fog": "🌫️", "showers": "🌦️", "rain": "🌧️", "storm": "⛈️",
                  "snow": "🌨️", "wind": "💨"}
 
+# Models skim past the end of a long system prompt, so weather questions
+# also carry a one-line reminder in the user turn itself.
+_WEATHER_Q = re.compile(
+    r"wetter|weather|forecast|vorhersage|prognose|regn|rain|schnee|snow|"
+    r"temperatur|gewitter|thunder|sonnig|sunny|bewölkt|cloudy", re.I)
+CARD_REMINDER = ("\n\n(Spotlight: end your answer with the weather "
+                 "```card block from the system message; do not mention "
+                 "the card in your text.)")
+
+
+def with_card_reminder(question: str) -> str:
+    return question + CARD_REMINDER if _WEATHER_Q.search(question) else question
+
+
 _CARD_RE = re.compile(r"```card[ \t]*\n?.*?```[ \t]*\n?", re.S)
 
 
@@ -2033,6 +2047,8 @@ class Spotlight(Gtk.ApplicationWindow):
         question = text or ("What is on this screenshot?" if image
                             else "Explain this.")
         message = _with_selection(question, sel) if sel else question
+        if self.cfg.get("cards", True):
+            message = with_card_reminder(message)
         if sel:
             self._sel_seen = sel
         self.entry.set_text("")

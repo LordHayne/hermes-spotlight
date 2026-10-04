@@ -114,7 +114,7 @@ Config lives in `~/.config/hermes-spotlight/config.json` (auto-created):
 - `notify`: desktop notification when an answer finishes while the bar is hidden
 - `ghost_suggestions`: grey completion from your own question history
 - `cards`: ask Hermes for native cards (weather) — adds a short format note
-  to the system message
+  to the system message and a one-line reminder to weather questions
 - `debug`: `true` logs clipboard/selection/focus events to
   `~/.cache/hermes-spotlight/debug.log` (for desktop-specific issues)
 - No config needed for the default setup — it just works.

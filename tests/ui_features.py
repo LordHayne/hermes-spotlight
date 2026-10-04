@@ -306,6 +306,9 @@ def steps(win, app):
     yield from until(lambda: got, 2)
     ok(got and "card" not in got[0] and got[0].endswith("Mehr Text"),
        "copy-answer leaves the card JSON out")
+    ok(m.with_card_reminder("wie wird das Wetter morgen?").endswith(m.CARD_REMINDER)
+       and m.with_card_reminder("erklär mir python") == "erklär mir python",
+       "weather questions carry the card reminder, others don't")
     ok(sysmsgs and "```card" in sysmsgs[-1] and '"type": "weather"' in sysmsgs[-1],
        "card format is sent to the agent in the system message")
 
