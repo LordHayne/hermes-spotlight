@@ -908,8 +908,9 @@ def _with_selection(question: str, sel: str) -> str:
 # --------------------------------------------------------------------------
 CARD_PROMPT = """\
 Rich cards: the user's spotlight renders some answers as native cards.
-When the user asks about the weather or a forecast, answer normally and
-then append exactly one fenced block (real data only, omit unknown fields):
+When the user asks for weather or forecast data (not when the weather just
+comes up in conversation), answer normally and then append exactly one
+fenced block (real data only, omit unknown fields):
 ```card
 {"type": "weather", "place": "<city>", "title": "<day/date asked about>",
  "icon": "<icon>", "min": <°C>, "max": <°C>, "summary": "<short conditions>",
@@ -924,14 +925,16 @@ WEATHER_ICONS = {"sun": "☀️", "clear": "☀️", "partly": "🌤️", "cloud
                  "fog": "🌫️", "showers": "🌦️", "rain": "🌧️", "storm": "⛈️",
                  "snow": "🌨️", "wind": "💨"}
 
-# Models skim past the end of a long system prompt, so weather questions
-# also carry a one-line reminder in the user turn itself.
+# Models skim past the end of a long system prompt, so questions that
+# mention the weather also carry a one-line reminder in the user turn.
+# The keyword match is loose on purpose; the reminder is conditional and
+# the model decides whether this really is a weather question.
 _WEATHER_Q = re.compile(
     r"wetter|weather|forecast|vorhersage|prognose|regn|rain|schnee|snow|"
     r"temperatur|gewitter|thunder|sonnig|sunny|bewölkt|cloudy", re.I)
-CARD_REMINDER = ("\n\n(Spotlight: end your answer with the weather "
-                 "```card block from the system message; do not mention "
-                 "the card in your text.)")
+CARD_REMINDER = ("\n\n(Spotlight: only if I am asking for weather or "
+                 "forecast data, end your answer with the weather ```card "
+                 "block from the system message; never mention the card.)")
 
 
 def with_card_reminder(question: str) -> str:
