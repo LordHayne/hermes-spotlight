@@ -383,6 +383,12 @@ def steps(win, app):
         while c is not None: walkb(c); c = c.get_next_sibling()
     walkb(bc)
     ok([b.get_label() for b in btns] == ["Details", "Shop"], "only ask/https buttons are created")
+    tb = m._blk_table({"columns": ["", "A"], "rows": [["Boost", "5 GHz"]]}, win.theme)
+    cells = [tb.get_child_at(0, 1), tb.get_child_at(1, 1)]
+    ok(cells[0].has_css_class("tablekey") and cells[1].has_css_class("tablecell"),
+       "empty first header -> first column styled as row labels")
+    tb2 = m._blk_table({"columns": ["Name", "A"], "rows": [["x", "y"]]}, win.theme)
+    ok(tb2.get_child_at(0, 1).has_css_class("tablecell"), "named first column stays a normal cell")
     ok(m._card_widget('{"type": "blocks", "blocks": [{"kind": "x"}]}') is None,
        "a blocks card with nothing valid is dropped")
     ok("\"type\": \"blocks\"" in m.CARD_PROMPT, "blueprint is part of the card prompt")

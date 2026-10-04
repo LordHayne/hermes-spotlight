@@ -755,6 +755,8 @@ label link:hover {{ text-decoration: underline; }}
 .pkgtime {{ color: {t['placeholder']}; font-family: monospace;
            font-size: 11px; min-width: 90px; }}
 .cardvalue {{ color: {t['text']}; font-weight: bold; font-size: 18px; }}
+.tablecell {{ color: {t['text']}; font-size: 13px; }}
+.tablekey {{ color: {t['placeholder']}; font-size: 13px; }}
 .statvalue {{ color: {t['text']}; font-weight: bold; font-size: 15px; }}
 .cardchip {{ color: {t['accent']}; background: {t['accent_bg_hover']};
             border-radius: 999px; padding: 2px 10px; font-size: 12px; }}
@@ -1300,12 +1302,15 @@ def _blk_kv(b, theme):
 def _blk_table(b, theme):
     cols = [_s(c, 30) for c in (b.get("columns") or [])][:6]
     rows = [r for r in (b.get("rows") or []) if isinstance(r, list)][:10]
-    grid = Gtk.Grid(column_spacing=14, row_spacing=4)
+    grid = Gtk.Grid(column_spacing=16, row_spacing=5)
+    # an empty first header means the first column labels the rows
+    row_labels = bool(cols) and not cols[0].strip()
     for j, c in enumerate(cols):
         grid.attach(_lbl(c, "dayname", xalign=0), j, 0, 1, 1)
     for i, r in enumerate(rows, start=1):
         for j, cell in enumerate(r[:max(1, len(cols)) if cols else 6]):
-            grid.attach(_lbl(_s(cell, 80), "statusval", xalign=0, wrap=True,
+            css = "tablekey" if row_labels and j == 0 else "tablecell"
+            grid.attach(_lbl(_s(cell, 80), css, xalign=0, wrap=True,
                              selectable=True), j, i, 1, 1)
     return grid
 
