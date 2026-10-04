@@ -2,7 +2,7 @@
 
 **A minimal, transparent Spotlight-style AI launcher for the Linux desktop.**
 
-Press `Super+Space`, ask anything — your local [hermes-agent](https://github.com/NousResearch/hermes-agent) answers with live streaming, tool-call status and Markdown rendering, in a slim translucent bar that feels native to your desktop.
+Press `Alt+Space`, ask anything — your local [hermes-agent](https://github.com/NousResearch/hermes-agent) answers with live streaming, tool-call status and Markdown rendering, in a slim translucent bar that feels native to your desktop.
 
 ![hermes-spotlight](screenshot.png)
 
@@ -41,7 +41,7 @@ The installer:
 1. Checks Python + PyGObject + GTK4
 2. Enables the gateway's local API server and generates an API key if missing
 3. Installs `hermes-spotlight` to `~/.local/bin` + an app-menu entry
-4. Binds **Super+Space** automatically on COSMIC and GNOME (KDE: creates the shortcut, enable once in System Settings)
+4. Binds **Alt+Space** automatically on COSMIC and GNOME (KDE: creates the shortcut, enable once in System Settings)
 
 On COSMIC the shortcut activates after the next login. GNOME is instant.
 
@@ -71,7 +71,7 @@ Edit `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom.ron`:
 
 ```ron
 {
-    (modifiers: [Super], key: "space", description: "Hermes Spotlight"): Spawn("/home/YOU/.local/bin/hermes-spotlight"),
+    (modifiers: [Alt], key: "space", description: Some("Hermes Spotlight")): Spawn("/home/YOU/.local/bin/hermes-spotlight"),
 }
 ```
 
@@ -84,7 +84,7 @@ Edit `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom.ron`:
 gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/']"
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/ name "Hermes Spotlight"
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/ command "$HOME/.local/bin/hermes-spotlight"
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/ binding "['<Super>space']"
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/hermes-spotlight/ binding "['<Alt>space']"
 ```
 
 </details>
@@ -107,7 +107,7 @@ System Settings → Shortcuts → Add Custom → command `~/.local/bin/hermes-sp
 ## How it works
 
 ```
-Super+Space ──▶ hermes-spotlight (GTK4 window, ~200 lines UI)
+Alt+Space ──▶ hermes-spotlight (GTK4 window, ~200 lines UI)
                     │
                     │  POST /api/sessions/{id}/chat/stream (SSE)
                     ▼

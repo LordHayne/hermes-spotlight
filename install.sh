@@ -93,14 +93,16 @@ case "$DE" in
     *COSMIC*)
         SC_DIR="$HOME/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1"
         mkdir -p "$SC_DIR"
-        SC_FILE="$SC_DIR/custom.ron"
-        # Idempotent merge: drop our old line (if any), keep other entries,
-        # re-add ours, rewrite as ONE valid RON map. Never blind-append.
-        "$PY" - "$SC_FILE" "$CMD" <<'PY' || { err "failed to write COSMIC shortcut"; exit 1; }
+        # COSMIC 1.9 reads `custom` (no extension) and REQUIRES Some() around
+        # descriptions; COSMIC 1.8 read custom.ron. Write both, same content.
+        # Default binding: Alt+Space (Super+Space collides with the
+        # InputSourceSwitch system shortcut in 1.9).
+        for SC_FILE in "$SC_DIR/custom" "$SC_DIR/custom.ron"; do
+            "$PY" - "$SC_FILE" "$CMD" <<'PY' || { err "failed to write COSMIC shortcut"; exit 1; }
 import os, sys
 path, cmd = sys.argv[1], sys.argv[2]
-entry = ('    (modifiers: [Super], key: "space", '
-         'description: "Hermes Spotlight"): Spawn("%s"),' % cmd)
+entry = ('    (modifiers: [Alt], key: "space", '
+         'description: Some("Hermes Spotlight")): Spawn("%s"),' % cmd)
 lines = []
 if os.path.exists(path):
     lines = [l for l in open(path).read().splitlines()
@@ -110,9 +112,11 @@ if lines:
 else:
     out = "{\n" + entry + "\n}\n"
 open(path, "w").write(out)
-print("  shortcut written (merged, other entries preserved)")
+print("  shortcut written:", path)
 PY
-        ok "COSMIC shortcut: Super+Space (takes effect after next login)"
+        done
+        ok "COSMIC shortcut: Alt+Space (custom + custom.ron, 1.8/1.9 compatible)"
+        say  "Note: Super+Space collides with the input-source switch in COSMIC 1.9 — Alt+Space is used."
         ;;
     *GNOME*|*ubuntu*)
         say "GNOME detected — installing custom shortcut via gsettings…"

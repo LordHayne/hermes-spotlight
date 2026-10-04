@@ -153,7 +153,7 @@ if [ $FULL -eq 1 ]; then
     trap '[ -f "$BKUP" ] && cp "$BKUP" "$SC" && rm -f "$BKUP"; echo "[cleanup] custom.ron restored"; rm -rf /tmp/hs-verify-*' EXIT
     cat > "$SC" <<'EOF'
 {
-    (modifiers: [Super], key: "p", description: "User binds our binary himself"): Spawn("/home/thomas/.local/bin/hermes-spotlight"),
+    (modifiers: [Alt], key: "p", description: Some("User binds our binary himself")): Spawn("/home/thomas/.local/bin/hermes-spotlight"),
 }
 EOF
     XDG_CURRENT_DESKTOP="COSMIC" bash "$HERE/install.sh" >/dev/null 2>&1; V $? "install (foreign entry present)"
